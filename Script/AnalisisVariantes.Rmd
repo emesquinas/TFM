@@ -1,0 +1,2651 @@
+---
+title: "TFM: ESTUDIO DE ALTERACIONES GENÉTICAS EN LA RUTA DE LA N-GLICOSILACIÓN Y SU IMPLICACIÓN EN EL DESARROLLO DE CARDIOPATÍAS CONGÉNITAS A TRAVÉS DE SECUENCIACIÓN MASIVA Y ANÁLISIS BIOINFORMÁTICO"
+author: "Autor: Eva María Esquinas Román. || Máster Universitario en Bioinformática, Universidad de Murcia."
+output: 
+  html_document:
+    df_print: paged
+    highlight: kate
+    theme: flatly
+    toc: yes
+    toc_float: yes
+---
+
+# 1. LIBRERÍAS A UTILIZAR
+```{r, message=FALSE, warning=FALSE} 
+library(readxl) 
+library(dplyr) 
+library(plyr) 
+library(writexl) 
+library(tidyr) 
+library(stringr)
+```
+
+# 2. FUNCIONES CREADAS
+
+Esta función sirve para elegir los que "NO estén en". Es la negativa a la función existente `%in%`
+```{r}
+`%notin%` <- Negate(`%in%`)
+```
+
+La siguiente función cambia las letras de los aminoácidos por abreviaturas.
+```{r}
+funcion_aminoacidos <- function(AminoacidPosition)
+{
+  aa_final <- 0
+  #CONDICIÓN: Que el aminoácido introducido no sea igual a "0 - Not Available")
+  if (AminoacidPosition != "0 - NotAvailable")
+  {
+    #Con la función split separo los aminoácidos y por otro lado, la posición.
+    posicion.split <- strsplit(unlist(AminoacidPosition), " - ")
+    posicion <- sapply(posicion.split, function(x) x[1])
+    aminoacido <- sapply(posicion.split, function(x) x[2])
+    
+    #Una vez tengo los aminoácidos separados de la separación, como los 
+    #aminoácidos aún siguen separados por "/", es necesario volver a utilizar 
+    #la función split.
+    aa.split <- strsplit(unlist(aminoacido), "/")
+    aa_prim <- sapply(aa.split, function(x) x[1])
+    aa_seg <- sapply(aa.split, function(x) x[2])
+    
+    #Si el primer o segundo aminoácido es un NA, se cambia por el otro 
+    #aminoácido de la pareja. Es decir, si el primer aminoácido es un NA, se 
+    #pone el mismo aminoácido que el segundo (y viceversa). Lo hacemos para 
+    #corregir los cambios sinónimos, que ocurren cuando cambia el codon pero no
+    #el aminoácido.
+    if(is.na(aa_prim))
+    {
+      aa_prim <- aa_seg
+    }
+    
+    if(is.na(aa_seg))
+    {
+      aa_seg <- aa_prim
+    }
+    
+    #Cambio de letras a abreviaturas de la lista de aminoácidos.
+    for (i in 1:length(List_aminoacidos))
+    {
+      #Accede a la "clave" de la lista aminoácidos. Es decir, a las letras 
+      #("A, B, C, D...")
+      letra_aa <- names(List_aminoacidos)[i]  
+      
+      if (aa_prim == letra_aa) 
+      {
+        #Asigna el valor de la lista de aminoácidos al aa.
+        primer_aa <- List_aminoacidos[[i]]
+      }
+      
+      if (aa_seg == letra_aa)
+      {
+        #Asigna el valor de la lista de aminoácidos al aa.
+        segundo_aa <- List_aminoacidos[[i]]
+      } 
+    }
+    
+    #Una vez tenemos el aminoácido 1, la posición y el aminoácido 2 por 
+    #separado, es hora de juntarlo en un "aminoácido final".
+    aa_final <- paste0(as.character(primer_aa), as.character(posicion),
+                       as.character(segundo_aa))
+    
+  } else{ 
+    #Si es igual a "0 - NotAvailable" (no tiene aminoácido ni posición), ponlo 
+    #tal cual está.
+    aa_final <- "0 - NotAvailable"
+  }
+  #Cuando utilicemos la función, devolverá unicamente el aminoácido final.
+  return(aa_final)
+}
+```
+
+
+# 3. CARGA DE TODAS LAS MUESTRAS
+
+Con la función `list.files` cogemos todos aquellos ficheros que terminen en ".xlsx".
+```{r}
+archivos <- list.files(pattern = "*.xlsx")
+```
+
+Cargamos el panel de 75 genes implicados en la ruta de la N-glicosilación. Posteriormente será utilizado. 
+```{r}
+panel_genes <- read.csv("./panel_genes.txt", sep="")
+```
+
+
+# 4. DECLARACIÓN DE LAS VARIABLES A UTILIZAR
+
+# 4.1. LEYENDA
+
+Se comenzará a explicar las abreviaturas de las siguientes variables:
+  
+- **"Vec"**: indica que esa variable es un vector.
+- **"Het"**: indica que la información correspondiente de los genes de esa muestra ha sido filtrada por heterocigosis y hemicigosis.
+- **"Hom"**: indica que la información correspondiente de los genes de esa muestra ha sido filtrada por homocigosis.
+- **"5"**: representa que la variable, que contiene información correspondiente a los genes de una muestra en concreto, se encuentra seleccionada al 5% de su frecuencia alélica (tomando como referencia la frecuencia alélica europea no finesa (ExAC Freq Nfe)).
+- **"35"**: representa que la variable, que contiene información correspondiente a los genes de una muestra en concreto, se encuentra seleccionada al 35% de su frecuencia alélica (tomando como referencia la frecuencia alélica europea (ExAC Freq Nfe)).
+- **"comp"**: representa que la variable contiene información sobre una muestra que presenta heterocigosis u homocigosis compuesta en sus genes.
+- **"CV"**: indica que se ha aplicado a esa muestra y su correspondiente información el filtro ClinVar. 
+- **"SP"**: indica que se ha aplicado a esa muestra y su correspondiente información los filtros SIFT y PolyPhen. 
+- **"i"**, **"k"**: son contadores. Se utilizan para llevar la cuenta de determinadas posiciones dentro de un bucle for.
+- **"no_desc"**: hace referencia a aquellos genes de cuyas muestras así como su correspondiente información, que presentan una frecuencia alélica igual a 0. La abreviatura significa "no descritas", ya que al tener esa frecuencia indica que no ha sido descrito en las bases de datos utilizadas.
+- **"ig"**: hace referencia a aquellas muestras que tienen los mismos genes seleccionados por frecuencia alélica, en homocigosis y heterocigosis.
+- **"BT"**: hace referencia a aquellas muestras clasificadas como "benignas" o "toleradas" según los métodos de predicción de patogenicidad SIFT y PolyPhen.
+- **"P"**: hace referencia a aquellas muestras clasificadas como patogénicas según los métodos de predicción de patogenicidad SIFT y PolyPhen.
+- **"pac"**: abreviatura de pacientes.
+- **"MAF"**: frecuencia del alelo minoritario.
+- **"alt"**: abreviatura de alteración (variante)
+- **"alt_mayor_5"**: variante que presenta una MAF superior al 5%
+- **"num"**: abreviatura de "número".
+- **"muestra"**: nombre de la muestra.
+-	**"genes"**: nombre del gen.
+-	**"variantes/var"**: representa la variante del gen, donde se muestra el alelo de referencia y el genotipo diploide para la muestra: “Referencia>AleloA/AleloB”.
+-	**"cromosomas"**: cromosoma en el que se encuentra el gen.
+-	**"coordenadas/coord"**: ubicación de la variante en el genoma.
+-	**"transcript"**: nombre del transcrito, generalmente un identificador de base de datos de RefSeq o Ensembl.
+-	**"consequence"**: efecto que puede tener esa variante en la transcripción, descrita en el vocabulario estandarizado de Sequence Ontology.
+-	**"prot_pos_aa"**: posición del aminoácido en la proteína y el cambio que se ha producido de qué aminoácido o aminoácidos.
+-	**"sift"**: puntación de la herramienta SIFT.
+-	**"polyphen"**: puntación de la herramienta SIFT.
+-	**"dbSNP_ID"**: es una etiqueta de identificación asignada por el NCBI a un grupo de SNP (o grupo) de SNP que se asignan a una ubicación idéntica. dbSNP contiene variaciones de un único nucleótido humano, microsatélites e inserciones y deleciones a pequeña escala junto con la publicación, frecuencia de población, consecuencia molecular e información de mapeo genómico y RefSeq para variaciones comunes y mutaciones clínicas.
+- **"frec_nfe/frec"**: frecuencia alélica de la variante en la base de datos ExAC de población no finlandesa.
+-	**"clinvar_signif"**: importancia clínica o clasificación asignada al alelo según la base de datos ClinVar.
+- **"primer_aa"**: hace referencia al primer aminoácido que tiene la nomenclatura de 3 letras (es decir, A = Ala = Alanina).
+- **"segundo_aa"**: hace referencia al segundo aminoácido que tiene la nomenclatura de 3 letras.
+- **"aa_final"**: hace referencia a la unión consecutiva de: primer aminoácido, posición y segundo aminoácido.
+- **"letra"**: se utiliza para hacer referencia a la nomenclatura de 1 letra cuando se recorre la lista de aminoácidos en un bucle for (se recoge únicamente la "clave" de la lista. Es decir, si la lista está compuesta por A:Ala, la letra sería "A").
+- **"aa_prim"**: hace referencia al primer aminoácido separado por la función `split` de la columna "ProteinPosition_Aminoacids".
+- **"aa_seg"**: hace referencia al segundo aminoácido separado por la función `split` de la columna "ProteinPosition_Aminoacids".
+. **"aminoacido"**: hace referencia al conjunto de aminoácidos (aminoácido 1 + aminoácido 2) separados por la función `split` de la columna "ProteinPosition_Aminoacids".
+- **"posicion"**: hace referencia a la posición del aminoácido en la proteína, separado por la función `split` de la columna "ProteinPosition_Aminoacids".
+- **"List_aminoacidos"**: lista de aminoácidos semejante a un diccionario clave:valor, siendo la clave la nomenclatura de 1 letra en cada aminoácido y su valor, su correspondiente nomenclatura de 3 letras.
+- **"homocigosis"**: indica si gen se encuentra en homocigosis.
+- **"heterocigosis"**: indica si el gen se encuentra en heterocigosis.
+- **"muestras_iguales"**: hace referencia a aquellas muestras que contienen los mismos genes en homocigosis y heterocigosis (y que han sido seleccionados según la frecuencia alélica establecida)
+
+```{r}
+# HOMOCIGOSIS SIN FILTROS
+Vec_muestra_hom <- c()
+Vec_genes_hom <- c()
+Vec_variantes_hom <- c()
+Vec_cromosomas_hom <- c()
+Vec_coordenadas_hom <- c()
+Vec_transcript_hom <- c()
+Vec_consequence_hom <- c()
+Vec_prot_pos_aa_hom <- c()
+Vec_sift_hom <- c()
+Vec_polyphen_hom <- c()
+Vec_dbSNP_ID_hom <- c()
+Vec_frec_nfe_hom <- c()
+Vec_clinvar_signif_hom <- c()
+
+# HOMOCIGOSIS SIN FILTROS + CLINVAR
+Vec_muestra_hom_CV <- c()
+Vec_genes_hom_CV <- c()
+Vec_variantes_hom_CV <- c()
+Vec_cromosomas_hom_CV <- c()
+Vec_coordenadas_hom_CV <- c()
+Vec_transcript_hom_CV <- c()
+Vec_consequence_hom_CV <- c()
+Vec_prot_pos_aa_hom_CV <- c()
+Vec_sift_hom_CV <- c()
+Vec_polyphen_hom_CV <- c()
+Vec_dbSNP_ID_hom_CV <- c()
+Vec_frec_nfe_hom_CV <- c()
+Vec_clinvar_signif_hom_CV <- c()
+
+# HETEROCIGOSIS SIN FILTROS
+Vec_muestra_het <- c()
+Vec_genes_het <- c()
+Vec_variantes_het <- c()
+Vec_cromosomas_het <- c()
+Vec_coordenadas_het <- c()
+Vec_transcript_het <- c()
+Vec_consequence_het <- c()
+Vec_prot_pos_aa_het <- c()
+Vec_sift_het <- c()
+Vec_polyphen_het <- c()
+Vec_dbSNP_ID_het <- c()
+Vec_frec_nfe_het <- c()
+Vec_clinvar_signif_het <- c()
+
+# HETEROCIGOSIS SIN FILTROS + CLINVAR
+Vec_muestra_het_CV <- c()
+Vec_genes_het_CV <- c()
+Vec_variantes_het_CV <- c()
+Vec_cromosomas_het_CV <- c()
+Vec_coordenadas_het_CV <- c()
+Vec_transcript_het_CV <- c()
+Vec_consequence_het_CV <- c()
+Vec_prot_pos_aa_het_CV <- c()
+Vec_sift_het_CV <- c()
+Vec_polyphen_het_CV <- c()
+Vec_dbSNP_ID_het_CV <- c()
+Vec_frec_nfe_het_CV <- c()
+Vec_clinvar_signif_het_CV <- c()
+
+# HOMOCIGOSIS AL 5% DE FRECUENCIA ALÉLICA
+Vec_muestra_hom_5 <- c()
+Vec_genes_hom_5 <- c()
+Vec_variantes_hom_5 <- c()
+Vec_cromosomas_hom_5 <- c()
+Vec_coordenadas_hom_5 <- c()
+Vec_transcript_hom_5 <- c()
+Vec_consequence_hom_5 <- c()
+Vec_prot_pos_aa_hom_5 <- c()
+Vec_sift_hom_5 <- c()
+Vec_polyphen_hom_5 <- c()
+Vec_dbSNP_ID_hom_5 <- c()
+Vec_frec_nfe_hom_5 <- c()
+Vec_clinvar_signif_hom_5 <- c()
+
+# HOMOCIGOSIS AL 5% DE FRECUENCIA ALÉLICA + SIFT/POLYPHEN
+Vec_muestra_hom_5_SP <- c()
+Vec_genes_hom_5_SP <- c()
+Vec_variantes_hom_5_SP <- c()
+Vec_cromosomas_hom_5_SP <- c()
+Vec_coordenadas_hom_5_SP <- c()
+Vec_transcript_hom_5_SP <- c()
+Vec_consequence_hom_5_SP <- c()
+Vec_prot_pos_aa_hom_5_SP <- c()
+Vec_sift_hom_5_SP <- c()
+Vec_polyphen_hom_5_SP <- c()
+Vec_dbSNP_ID_hom_5_SP <- c()
+Vec_frec_nfe_hom_5_SP <- c()
+Vec_clinvar_signif_hom_5_SP <- c()
+
+# HOMOCIGOSIS AL 5% DE FRECUENCIA ALÉLICA + CLINVAR
+Vec_muestra_hom_5_CV <- c()
+Vec_genes_hom_5_CV <- c()
+Vec_variantes_hom_5_CV <- c()
+Vec_cromosomas_hom_5_CV <- c()
+Vec_coordenadas_hom_5_CV <- c()
+Vec_transcript_hom_5_CV <- c()
+Vec_consequence_hom_5_CV <- c()
+Vec_prot_pos_aa_hom_5_CV <- c()
+Vec_sift_hom_5_CV <- c()
+Vec_polyphen_hom_5_CV <- c()
+Vec_dbSNP_ID_hom_5_CV <- c()
+Vec_frec_nfe_hom_5_CV <- c()
+Vec_clinvar_signif_hom_5_CV <- c()
+
+# HOMOCIGOSIS AL 35% DE FRECUENCIA ALÉLICA
+Vec_muestra_hom_35 <- c()
+Vec_genes_hom_35 <- c()
+Vec_variantes_hom_35 <- c()
+Vec_cromosomas_hom_35 <- c()
+Vec_coordenadas_hom_35 <- c()
+Vec_transcript_hom_35 <- c()
+Vec_consequence_hom_35 <- c()
+Vec_prot_pos_aa_hom_35 <- c()
+Vec_sift_hom_35 <- c()
+Vec_polyphen_hom_35 <- c()
+Vec_dbSNP_ID_hom_35 <- c()
+Vec_frec_nfe_hom_35 <- c()
+Vec_clinvar_signif_hom_35 <- c()
+
+# HOMOCIGOSIS AL 35% DE FRECUENCIA ALÉLICA + SIFT/POLYPHEN
+Vec_muestra_hom_35_SP <- c()
+Vec_genes_hom_35_SP <- c()
+Vec_variantes_hom_35_SP <- c()
+Vec_cromosomas_hom_35_SP <- c()
+Vec_coordenadas_hom_35_SP <- c()
+Vec_transcript_hom_35_SP <- c()
+Vec_consequence_hom_35_SP <- c()
+Vec_prot_pos_aa_hom_35_SP <- c()
+Vec_sift_hom_35_SP <- c()
+Vec_polyphen_hom_35_SP <- c()
+Vec_dbSNP_ID_hom_35_SP <- c()
+Vec_frec_nfe_hom_35_SP <- c()
+Vec_clinvar_signif_hom_35_SP <- c()
+
+# HOMOCIGOSIS AL 35% DE FRECUENCIA ALÉLICA + CLINVAR
+Vec_muestra_hom_35_CV <- c()
+Vec_genes_hom_35_CV <- c()
+Vec_variantes_hom_35_CV <- c()
+Vec_cromosomas_hom_35_CV <- c()
+Vec_coordenadas_hom_35_CV <- c()
+Vec_transcript_hom_35_CV <- c()
+Vec_consequence_hom_35_CV <- c()
+Vec_prot_pos_aa_hom_35_CV <- c()
+Vec_sift_hom_35_CV <- c()
+Vec_polyphen_hom_35_CV <- c()
+Vec_dbSNP_ID_hom_35_CV <- c()
+Vec_frec_nfe_hom_35_CV <- c()
+Vec_clinvar_signif_hom_35_CV <- c()
+
+# HETEROCIGOSIS AL 5% DE FRECUENCIA ALÉLICA
+Vec_muestra_het_5 <- c()
+Vec_genes_het_5 <- c()
+Vec_variantes_het_5 <- c()
+Vec_cromosomas_het_5 <- c()
+Vec_coordenadas_het_5 <- c()
+Vec_transcript_het_5 <- c()
+Vec_consequence_het_5 <- c()
+Vec_prot_pos_aa_het_5 <- c()
+Vec_sift_het_5 <- c()
+Vec_polyphen_het_5 <- c()
+Vec_dbSNP_ID_het_5 <- c()
+Vec_frec_nfe_het_5 <- c()
+Vec_clinvar_signif_het_5 <- c()
+
+# HETEROCIGOSIS AL 5% DE FRECUENCIA ALÉLICA + SIFT/POLYPHEN
+Vec_muestra_het_5_SP <- c()
+Vec_genes_het_5_SP <- c()
+Vec_variantes_het_5_SP <- c()
+Vec_cromosomas_het_5_SP <- c()
+Vec_coordenadas_het_5_SP <- c()
+Vec_transcript_het_5_SP <- c()
+Vec_consequence_het_5_SP <- c()
+Vec_prot_pos_aa_het_5_SP <- c()
+Vec_sift_het_5_SP <- c()
+Vec_polyphen_het_5_SP <- c()
+Vec_dbSNP_ID_het_5_SP <- c()
+Vec_frec_nfe_het_5_SP <- c()
+Vec_clinvar_signif_het_5_SP <- c()
+ 
+# HETEROCIGOSIS AL 5% DE FRECUENCIA ALÉLICA + CLINVAR
+Vec_muestra_het_5_CV <- c()
+Vec_genes_het_5_CV <- c()
+Vec_variantes_het_5_CV <- c()
+Vec_cromosomas_het_5_CV <- c()
+Vec_coordenadas_het_5_CV <- c()
+Vec_transcript_het_5_CV <- c()
+Vec_consequence_het_5_CV <- c()
+Vec_prot_pos_aa_het_5_CV <- c()
+Vec_sift_het_5_CV <- c()
+Vec_polyphen_het_5_CV <- c()
+Vec_dbSNP_ID_het_5_CV <- c()
+Vec_frec_nfe_het_5_CV <- c()
+Vec_clinvar_signif_het_5_CV <- c()
+
+# PARA COMBINAR LOS GENES DE LAS tabla_het y tabla_het_5_SP (solo para los genes que no estén en la primera)
+Vec_muestra_het_5_total <- c()
+Vec_genes_het_5_total <- c()
+Vec_variantes_het_5_total <- c()
+Vec_cromosomas_het_5_total <- c()
+Vec_coordenadas_het_5_total <- c()
+Vec_transcript_het_5_total <- c()
+Vec_consequence_het_5_total <- c()
+Vec_prot_pos_aa_het_5_total <- c()
+Vec_sift_het_5_total <- c()
+Vec_polyphen_het_5_total <- c()
+Vec_dbSNP_ID_het_5_total <- c()
+Vec_frec_nfe_het_5_total <- c()
+Vec_clinvar_signif_het_5_total <- c()
+
+# CAMBIO DE FORMATO PARA LA COLUMNA AMINOÁCIDOS + POSICIÓN
+List_aminoacidos <- list(A = "Ala", C = "Cys", D = "Asp", E = "Glu", 
+                         F = "Phe", G = "Gly", H = "His", I = "Ile", 
+                         K = "Lys", L = "Leu", M = "Met", N = "Asn", 
+                         P = "Pro", Q = "Gln", R = "Arg", S = "Ser",
+                         T = "Thr", V = "Val", W = "Trp", Y = "Tyr",
+                         "*"  = "STOP")
+
+# VARIANTES NO DESCRITAS (Frecuencia Alélica = 0)
+
+## Heterocigosis
+Vec_muestra_no_desc_het <- c()
+Vec_gen_no_desc_het <- c()
+Vec_var_no_desc_het <- c()
+Vec_cromosoma_no_desc_het <- c()
+Vec_coord_no_desc_het <- c()
+Vec_prot_pos_aa_no_desc_het <- c()
+Vec_consequence_no_desc_het <- c()
+Vec_heterocigosis <- c()
+Vec_sift_no_desc_het <- c()
+Vec_polyphen_no_desc_het <- c()
+Vec_freq_no_desc_het <- c()
+Vec_dbSNP_ID_no_desc_het <- c()
+Vec_clinvar_signif_no_desc_het <- c()
+
+## Homocigosis
+Vec_muestra_no_desc_hom <- c()
+Vec_gen_no_desc_hom <- c()
+Vec_var_no_desc_hom <- c()
+Vec_cromosoma_no_desc_hom <- c()
+Vec_coord_no_desc_hom <- c()
+Vec_prot_pos_aa_no_desc_hom <- c()
+Vec_consequence_no_desc_hom <- c()
+Vec_homocigosis <- c()
+Vec_sift_no_desc_hom <- c()
+Vec_polyphen_no_desc_hom <- c()
+Vec_freq_no_desc_hom <- c()
+Vec_dbSNP_ID_no_desc_hom <- c()
+Vec_clinvar_signif_no_desc_hom <- c()
+
+# GENES IGUALES EN HOMOCIGOSIS Y HETEROCIGOSIS (QUE ESTÉN SELECCIONADOS)
+Vec_muestras_iguales <- c()
+Vec_gen_hom_ig <- c()
+Vec_variantes_hom_ig <- c()
+Vec_cromosomas_hom_ig <- c()
+Vec_coordenadas_hom_ig <- c()
+Vec_transcript_hom_ig <- c()
+Vec_consequence_hom_ig <- c()
+Vec_prot_pos_aa_hom_ig <- c()
+Vec_sift_hom_ig <- c()
+Vec_polyphen_hom_ig <- c()
+Vec_dbSNP_ID_hom_ig <- c()
+Vec_frec_nfe_hom_ig <- c()
+Vec_clinvar_signif_hom_ig <- c()
+
+Vec_gen_het_ig <- c()
+Vec_variantes_het_ig <- c()
+Vec_cromosomas_het_ig <- c()
+Vec_coordenadas_het_ig <- c()
+Vec_transcript_het_ig <- c()
+Vec_consequence_het_ig <- c()
+Vec_prot_pos_aa_het_ig <- c()
+Vec_sift_het_ig <- c()
+Vec_polyphen_het_ig <- c()
+Vec_dbSNP_ID_het_ig <- c()
+Vec_frec_nfe_het_ig <- c()
+Vec_clinvar_signif_het_ig <- c()
+
+# DESCRIPCIÓN DE RESULTADOS
+
+## Homocigosis + SIFT/POLYPHEN benigno/tolerado
+Vec_muestra_hom_SP_BT <- c()
+Vec_genes_hom_SP_BT <- c()
+Vec_variantes_hom_SP_BT <- c()
+Vec_cromosomas_hom_SP_BT <- c()
+Vec_coordenadas_hom_SP_BT <- c()
+Vec_transcript_hom_SP_BT <- c()
+Vec_consequence_hom_SP_BT <- c()
+Vec_prot_pos_aa_hom_SP_BT <- c()
+Vec_sift_hom_SP_BT <- c()
+Vec_polyphen_hom_SP_BT <- c()
+Vec_dbSNP_ID_hom_SP_BT <- c()
+Vec_frec_nfe_hom_SP_BT <- c()
+Vec_clinvar_signif_hom_SP_BT <- c()
+
+# Homocigosis + SIFT/POLYPHEN patogénico
+Vec_muestra_hom_SP_P <- c()
+Vec_genes_hom_SP_P <- c()
+Vec_variantes_hom_SP_P <- c()
+Vec_cromosomas_hom_SP_P <- c()
+Vec_coordenadas_hom_SP_P <- c()
+Vec_transcript_hom_SP_P <- c()
+Vec_consequence_hom_SP_P <- c()
+Vec_prot_pos_aa_hom_SP_P <- c()
+Vec_sift_hom_SP_P <- c()
+Vec_polyphen_hom_SP_P <- c()
+Vec_dbSNP_ID_hom_SP_P <- c()
+Vec_frec_nfe_hom_SP_P <- c()
+Vec_clinvar_signif_hom_SP_P <- c()
+
+# Heterocigosis + SIFT/POLYPHEN benigno/tolerado
+Vec_muestra_het_SP_BT <- c()
+Vec_genes_het_SP_BT <- c()
+Vec_variantes_het_SP_BT <- c()
+Vec_cromosomas_het_SP_BT <- c()
+Vec_coordenadas_het_SP_BT <- c()
+Vec_transcript_het_SP_BT <- c()
+Vec_consequence_het_SP_BT <- c()
+Vec_prot_pos_aa_het_SP_BT <- c()
+Vec_sift_het_SP_BT <- c()
+Vec_polyphen_het_SP_BT <- c()
+Vec_dbSNP_ID_het_SP_BT <- c()
+Vec_frec_nfe_het_SP_BT <- c()
+Vec_clinvar_signif_het_SP_BT <- c()
+
+# Heterocigosis + SIFT/POLYPHEN patogénico
+Vec_muestra_het_SP_P <- c()
+Vec_genes_het_SP_P <- c()
+Vec_variantes_het_SP_P <- c()
+Vec_cromosomas_het_SP_P <- c()
+Vec_coordenadas_het_SP_P <- c()
+Vec_transcript_het_SP_P <- c()
+Vec_consequence_het_SP_P <- c()
+Vec_prot_pos_aa_het_SP_P <- c()
+Vec_sift_het_SP_P <- c()
+Vec_polyphen_het_SP_P <- c()
+Vec_dbSNP_ID_het_SP_P <- c()
+Vec_frec_nfe_het_SP_P <- c()
+Vec_clinvar_signif_het_SP_P <- c()
+
+# ALTERACIONES CON UNA MAF SUPERIOR AL 5%
+Vec_genes <- c()
+Vec_variantes <- c()
+Vec_alt_mayor_5 <- c()
+Vec_coord_mayor_5 <- c()
+Vec_frec_mayor_5 <- c()
+```
+
+
+# 5. OBTENCIÓN DE MUESTRAS (SIN FILTROS)
+
+El siguiente bloque de código se compone de un gran bucle for que recoge cada uno de los nombres de los ficheros terminados en ".xlsx" y procede a la apertura de los mismos, mediante la función `read_excel`. Según lo que ponga en el parámetro "sheet" abrirá una hoja u otra de estos ficheros.
+
+Todos los ficheros se componen de 4 hojas diferentes:
+
+- **"hom"**: contiene aquellas muestras que han sido filtradas por homocigosis.
+- **"het_hemiz"**: contiene aquellas muestras que han sido filtradas por heterocigosis y hemicigosis.
+- **"clinvar-het_hemiz"**: contiene aquellas muestras que han sido filtradas por ClinVar y heterocigosis/hemicigosis.
+- **"clinvar-hom"**: contiene aquellas muestras que han sido filtradas por ClinVar y homocigosis.
+
+Una vez abierta la correspondiente hoja del archivo, se continúa con un breve preprocesamiento de la muestra. Este incluye:
+
+- Conversión de la variable que contiene al archivo en una tabla de tipo data.frame.
+- Renombramiento de los valores que no se encuentran disponibles y que aparecen como NA. Se les "renombra" con "NotAvailable". Esta paso es fundamental para que no dé errores en los siguientes procedimientos.
+- Unión de las columnas "Protein Position" y "Amino Acids" en una nueva, sin borrar las anteriores. La nueva columna toma el nombre de "ProteinPosition - Aminoacids".
+
+```{r}
+#Recorre todos los nombres terminados en xlsx.
+for (archivo in archivos)
+{
+  ########################### 1.- HOMOCIGOSIS ###########################
+  
+  #Lectura del archivo, concretamente su hoja "hom".
+  hom <- read_excel(archivo, sheet = "hom")
+  
+  #Preprocesamiento de la muestra
+  hom <- as.data.frame(hom)
+  
+  #Transforma los valores "NA" en "NotAvailable"
+  hom[is.na(hom)] <- "NotAvailable" 
+                        
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  hom <- hom %>%
+    unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`, 
+          sep=" - ", remove=FALSE)
+  
+  for (fila in 1:nrow(hom)) 
+  {
+    #La función file_path_sans_ext recoge el nombre del archivo sin su 
+    #extensión.
+    Vec_muestra_hom <- c(Vec_muestra_hom, tools::file_path_sans_ext(archivo))
+    Vec_genes_hom <- c(Vec_genes_hom, hom$Gene[fila])
+    Vec_variantes_hom <- c(Vec_variantes_hom, hom$Variant[fila])
+    Vec_cromosomas_hom <- c(Vec_cromosomas_hom, hom$Chr[fila])
+    Vec_coordenadas_hom <- c(Vec_coordenadas_hom, hom$Coordinate[fila])
+    Vec_transcript_hom <- c(Vec_transcript_hom, hom$Transcript[fila])
+    Vec_consequence_hom <- c(Vec_consequence_hom, hom$Consequence[fila])
+    Vec_prot_pos_aa_hom <- c(Vec_prot_pos_aa_hom,
+                           hom$`ProteinPosition - Aminoacids`[fila])
+    Vec_sift_hom <- c(Vec_sift_hom, hom$Sift[fila])
+    Vec_polyphen_hom <- c(Vec_polyphen_hom, hom$PolyPhen[fila])
+    Vec_dbSNP_ID_hom <- c(Vec_dbSNP_ID_hom, hom$`dbSNP ID`[fila])
+    Vec_frec_nfe_hom <- c(Vec_frec_nfe_hom, hom$`ExAC Freq Nfe`[fila]) 
+    Vec_clinvar_signif_hom <- c(Vec_clinvar_signif_hom, 
+                              hom$`ClinVar Significance`[fila])
+  }
+  
+  # 1.1. FILTRO CLINVAR EN HOMOCIGOSIS
+  
+  #Lectura del archivo, concretamente su hoja "clinvar-hom".
+  hom_clinvar <- read_excel(archivo, sheet = "clinvar-hom")
+  
+  #Preprocesamiento de la muestra
+  hom_clinvar <- as.data.frame(hom_clinvar)
+  
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  hom_clinvar <- hom_clinvar %>%
+    unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`,
+          sep=" - ", remove=FALSE)
+  
+  #CONDICIÓN: Que la tabla no esté vacía.
+  if (nrow(hom_clinvar) != 0)
+  {
+    for (fila in 1:nrow(hom_clinvar))
+    {
+      #La función file_path_sans_ext recoge el nombre del archivo sin su 
+      #extensión.
+      Vec_muestra_hom_CV <- c(Vec_muestra_hom_CV, 
+                              tools::file_path_sans_ext(archivo))
+      Vec_genes_hom_CV<- c(Vec_genes_hom_CV, hom_clinvar$Gene[fila])
+      Vec_variantes_hom_CV <- c(Vec_variantes_hom_CV,
+                                hom_clinvar$Variant[fila])
+      Vec_cromosomas_hom_CV <- c(Vec_cromosomas_hom_CV,
+                                 hom_clinvar$Chr[fila])
+      Vec_coordenadas_hom_CV <- c(Vec_coordenadas_hom_CV,
+                                  hom_clinvar$Coordinate[fila])
+      Vec_transcript_hom_CV <- c(Vec_transcript_hom_CV,
+                                 hom_clinvar$Transcript[fila])
+      Vec_consequence_hom_CV <- c(Vec_consequence_hom_CV,
+                                  hom_clinvar$Consequence[fila])
+      Vec_prot_pos_aa_hom_CV <- c(Vec_prot_pos_aa_hom_CV,
+                       hom_clinvar$`ProteinPosition - Aminoacids`[fila])
+      Vec_sift_hom_CV <- c(Vec_sift_hom_CV, hom_clinvar$Sift[fila])
+      Vec_polyphen_hom_CV <- c(Vec_polyphen_hom_CV,
+                               hom_clinvar$PolyPhen[fila])
+      Vec_dbSNP_ID_hom_CV <- c(Vec_dbSNP_ID_hom_CV,
+                               hom_clinvar$`dbSNP ID`[fila])
+      Vec_frec_nfe_hom_CV <- c(Vec_frec_nfe_hom_CV, 
+                               hom_clinvar$`ExAC Freq Nfe`[fila]) 
+      Vec_clinvar_signif_hom_CV <- c(Vec_clinvar_signif_hom_CV,
+                               hom_clinvar$`ClinVar Significance`[fila])
+    }
+  }
+  
+  
+  ########################### 2.- HETEROCIGOSIS ###########################
+  
+  #Lectura del archivo, concretamente su hoja "het_hemiz".
+  het <- read_excel(archivo, sheet = "het_hemiz")
+  
+  #Preprocesamiento de la muestra
+  het <- as.data.frame(het)
+  
+  #Transforma los valores "NA" en "NotAvailable"
+  het[is.na(het)] <- "NotAvailable" 
+  
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  het <- het %>%
+    unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`, 
+          sep=" - ", remove=FALSE)
+  
+  for (fila in 1:nrow(het)) 
+  {
+    #La función file_path_sans_ext recoge el nombre del archivo sin su 
+    #extensión.
+    Vec_muestra_het <- c(Vec_muestra_het,
+                         tools::file_path_sans_ext(archivo))
+    Vec_genes_het <- c(Vec_genes_het, het$Gene[fila])
+    Vec_variantes_het <- c(Vec_variantes_het, het$Variant[fila])
+    Vec_cromosomas_het <- c(Vec_cromosomas_het, het$Chr[fila])
+    Vec_coordenadas_het <- c(Vec_coordenadas_het, het$Coordinate[fila])
+    Vec_transcript_het <- c(Vec_transcript_het, het$Transcript[fila])
+    Vec_consequence_het <- c(Vec_consequence_het, het$Consequence[fila])
+    Vec_prot_pos_aa_het <- c(Vec_prot_pos_aa_het,
+                             het$`ProteinPosition - Aminoacids`[fila])
+    Vec_sift_het <- c(Vec_sift_het, het$Sift[fila])
+    Vec_polyphen_het <- c(Vec_polyphen_het, het$PolyPhen[fila])
+    Vec_dbSNP_ID_het <- c(Vec_dbSNP_ID_het, het$`dbSNP ID`[fila])
+    Vec_frec_nfe_het <- c(Vec_frec_nfe_het, het$`ExAC Freq Nfe`[fila]) 
+    Vec_clinvar_signif_het <- c(Vec_clinvar_signif_het, 
+                                het$`ClinVar Significance`[fila])
+  }
+  
+  # 2.1. FILTRO CLINVAR EN HETEROCIGOSIS
+  
+  #Lectura del archivo, concretamente su hoja "clinvar-het_hemiz".
+  het_clinvar <- read_excel(archivo, sheet = "clinvar-het_hemiz")
+  
+  #Preprocesamiento de la muestra
+  het_clinvar <- as.data.frame(het_clinvar)
+  
+  #Transforma los valores "NA" en "NotAvailable"
+  het_clinvar[is.na(het_clinvar)] <- "NotAvailable" 
+
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  het_clinvar <- het_clinvar %>%
+    unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`,
+          sep=" - ", remove=FALSE)
+  
+  #CONDICIÓN: Que la tabla no esté vacía.
+  if (nrow(het_clinvar) != 0)
+  {
+    for (fila in 1:nrow(het_clinvar))
+    {
+      #La función file_path_sans_ext recoge el nombre del archivo sin su 
+      #extensión.
+      Vec_muestra_het_CV <- c(Vec_muestra_het_CV, 
+                              tools::file_path_sans_ext(archivo))
+      Vec_genes_het_CV <- c(Vec_genes_het_CV, het_clinvar$Gene[fila])
+      Vec_variantes_het_CV <- c(Vec_variantes_het_CV,
+                                het_clinvar$Variant[fila])
+      Vec_cromosomas_het_CV <- c(Vec_cromosomas_het_CV,
+                                 het_clinvar$Chr[fila])
+      Vec_coordenadas_het_CV <- c(Vec_coordenadas_het_CV,
+                                  het_clinvar$Coordinate[fila])
+      Vec_transcript_het_CV <- c(Vec_transcript_het_CV,
+                                 het_clinvar$Transcript[fila])
+      Vec_consequence_het_CV <- c(Vec_consequence_het_CV,
+                                  het_clinvar$Consequence[fila])
+      Vec_prot_pos_aa_het_CV <- c(Vec_prot_pos_aa_het_CV,
+                   het_clinvar$`ProteinPosition - Aminoacids`[fila])
+      Vec_sift_het_CV <- c(Vec_sift_het_CV, het_clinvar$Sift[fila])
+      Vec_polyphen_het_CV <- c(Vec_polyphen_het_CV,
+                               het_clinvar$PolyPhen[fila])
+      Vec_dbSNP_ID_het_CV <- c(Vec_dbSNP_ID_het_CV,
+                               het_clinvar$`dbSNP ID`[fila])
+      Vec_frec_nfe_het_CV <- c(Vec_frec_nfe_het_CV, 
+                               het_clinvar$`ExAC Freq Nfe`[fila]) 
+      Vec_clinvar_signif_het_CV <- c(Vec_clinvar_signif_het_CV,
+                              het_clinvar$`ClinVar Significance`[fila])
+    }
+  }
+}
+```
+
+## 5.1. GENERACIÓN DE TABLAS 
+```{r}
+tabla_hom <- data.frame(Vec_muestra_hom, Vec_genes_hom, Vec_variantes_hom, Vec_cromosomas_hom, Vec_coordenadas_hom, Vec_transcript_hom, Vec_consequence_hom, Vec_prot_pos_aa_hom, Vec_sift_hom, Vec_polyphen_hom, Vec_dbSNP_ID_hom, Vec_frec_nfe_hom, Vec_clinvar_signif_hom)
+
+tabla_hom_CV <- data.frame(Vec_muestra_hom_CV, Vec_genes_hom_CV, Vec_variantes_hom_CV, Vec_cromosomas_hom_CV, Vec_coordenadas_hom_CV, Vec_transcript_hom_CV, Vec_consequence_hom_CV, Vec_prot_pos_aa_hom_CV, Vec_sift_hom_CV, Vec_polyphen_hom_CV, Vec_dbSNP_ID_hom_CV, Vec_frec_nfe_hom_CV, Vec_clinvar_signif_hom_CV)
+
+tabla_het <- data.frame(Vec_muestra_het, Vec_genes_het, Vec_variantes_het, Vec_cromosomas_het, Vec_coordenadas_het, Vec_transcript_het, Vec_consequence_het, Vec_prot_pos_aa_het, Vec_sift_het, Vec_polyphen_het, Vec_dbSNP_ID_het, Vec_frec_nfe_het, Vec_clinvar_signif_het)
+
+tabla_het_CV <- data.frame(Vec_muestra_het_CV, Vec_genes_het_CV, Vec_variantes_het_CV, Vec_cromosomas_het_CV, Vec_coordenadas_het_CV, Vec_transcript_het_CV, Vec_consequence_het_CV, Vec_prot_pos_aa_het_CV, Vec_sift_het_CV, Vec_polyphen_het_CV, Vec_dbSNP_ID_het_CV, Vec_frec_nfe_het_CV, Vec_clinvar_signif_het_CV)
+```
+
+Dado que por cuestiones de estética e interpretación es más fácil trabajar con el formato "Aminoácido+Posición+Aminoácido", se procede a cambiar su formato mediante los siguientes comandos, teniendo en cuenta la lista de aminoácidos cargados al principio de este trabajo. Este cambio se hará en todas las tablas, en su correspondiente columna denominada "Vec_prot_pos_aa". 
+Para ello, se utilizará la función denominada `funcion_aminoacidos` cargada al principio de este script.
+
+```{r}
+#Para poder hacer los procedimientos posteriores, es necesario pasar todas aquellas columnas que sean factores a carácter.
+
+tabla_het[sapply(tabla_het, is.factor)] <- lapply(tabla_het[sapply(tabla_het, is.factor)], as.character)
+
+tabla_het_CV[sapply(tabla_het_CV, is.factor)] <- lapply(tabla_het_CV[sapply(tabla_het_CV, is.factor)], as.character)
+
+tabla_hom[sapply(tabla_hom, is.factor)] <- lapply(tabla_hom[sapply(tabla_hom, is.factor)], as.character)
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_CV) != 0)
+{
+  tabla_hom_CV[sapply(tabla_hom_CV, is.factor)] <- lapply(tabla_hom_CV[sapply(tabla_hom_CV, is.factor)], as.character)
+}
+
+#En las siguientes líneas de código se procederá a utilizar la función "funcion_aminoacidos" para cambiar las letras de aminoácidos por sus abreviaturas, así como ponerlo en orden (aminoácido+posición+aminoácido). Se hará en todas las tablas.
+
+#1) Tabla_hom
+
+i <- 1
+for (aminoacido_hom in tabla_hom$Vec_prot_pos_aa_hom)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_hom)
+  tabla_hom$Vec_prot_pos_aa_hom[i] <- aminoacido_new
+  i <- i+1
+} 
+
+
+# 2) Tabla_hom_CV
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_CV) != 0)
+{
+  i <- 1
+  for (aminoacido_hom_CV in tabla_hom_CV$Vec_prot_pos_aa_hom)
+  {
+    aminoacido_new <- funcion_aminoacidos(aminoacido_hom_CV)
+    tabla_hom_CV$Vec_prot_pos_aa_hom_CV[i] <- aminoacido_new
+    i <- i+1
+  } 
+}
+
+  
+#3) Tabla_het
+
+i <- 1
+for (aminoacido_het in tabla_het$Vec_prot_pos_aa_het)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_het)
+  tabla_het$Vec_prot_pos_aa_het[i] <- aminoacido_new
+  i <- i+1
+} 
+
+#4) Tabla_het_CV
+
+i <- 1
+for (aminoacido_het_CV in tabla_het_CV$Vec_prot_pos_aa_het_CV)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_het_CV)
+  tabla_het_CV$Vec_prot_pos_aa_het_CV[i] <- aminoacido_new
+  i <- i+1
+} 
+```
+
+Cambiamos el nombre de las columnas de cada tabla:
+```{r}
+colnames(tabla_hom) <- c("Sample", "Gene_Hom", "Variant_Hom", "Chr_Hom", "Coordinate_Hom", "Transcript_Hom", "Consequence_Hom", "Protein_Position - AminoAcids_Hom", "Sift_Hom", "PolyPhen_Hom", "dbSNP_ID_Hom", "ExACFreqNfe_Hom", "ClinVar-Significance_Hom")
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_CV) != 0)
+{
+  colnames(tabla_hom_CV) <- c("Sample", "Gene_Hom_CV", "Variant_Hom_CV", "Chr_Hom_CV", "Coordinate_Hom_CV", "Transcript_Hom_CV", "Consequence_Hom_CV", "Protein_Position - AminoAcids_Hom_CV", "Sift_Hom_CV", "PolyPhen_Hom_CV", "dbSNP_ID_Hom_CV", "ExACFreqNfe_Hom_CV", "ClinVar-Significance_Hom_CV")
+}
+
+colnames(tabla_het) <- c("Sample", "Gene_Het", "Variant_Het", "Chr_Het", "Coordinate_Het", "Transcript_Het", "Consequence_Het", "Protein_Position - AminoAcids_Het", "Sift_Het", "PolyPhen_Het", "dbSNP_ID_Het", "ExACFreqNfe_Het", "ClinVar-Significance_Het")
+
+colnames(tabla_het_CV) <- c("Sample", "Gene_Het_CV", "Variant_Het_CV", "Chr_Het_CV", "Coordinate_Het_CV", "Transcript_Het_CV", "Consequence_Het_CV", "Protein_Position - AminoAcids_Het_CV", "Sift_Het_CV", "PolyPhen_Het_CV", "dbSNP_ID_Het_CV", "ExACFreqNfe_Het_CV", "ClinVar-Significance_Het_CV")
+```
+
+## 5.2. GENERACIÓN DE ARCHIVOS XLSX
+
+```{r}
+write_xlsx(tabla_hom, path = "./Excels_Script/SinFiltros/Homocigotos.xlsx")
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_CV) != 0)
+{
+  write_xlsx(tabla_hom_CV, path = "./Excels_Script/SinFiltros/Homocigotos_CV.xlsx")
+}
+
+write_xlsx(tabla_het, path = "./Excels_Script/SinFiltros/Heterocigotos.xlsx")
+
+write_xlsx(tabla_het_CV, path = "./Excels_Script/SinFiltros/Heterocigotos_CV.xlsx")
+```
+
+
+# 6. PROCESO DE FILTRACIÓN DE MUESTRAS
+
+Al igual que se hizo en el apartado anterior (Obtención de muestras -sin filtros-), se recogen cada uno de los nombres de los ficheros terminados en ".xlsx" y se procede a la apertura de los mismos, mediante la función `read_excel`. Según lo que ponga en el parámetro "sheet" abrirá una hoja u otra de estos ficheros.
+
+Posteriormente, será realizado exactamente el mismo preprocesamiento de la muestra explicado anteriormente.
+
+Una vez finalizado el pre-procesamiento, se realizarán los siguientes filtros:
+
+1- **Frecuencia alélica** en:
+
+  + Homocigosis:
+    + Al 5% (ExAC Freq Nfe <= 5)
+    + Al 35% (ExAC Freq Nfe <= 35)
+    
+  + Heterocigosis:
+    + Al 5% (ExAC Freq Nfe <= 5)
+
+2- **SIFT y Polyphen** en:
+
+  + Homocigosis:
+    + Al 5% (ExAC Freq Nfe <= 5)
+    + Al 35% (ExAC Freq Nfe <= 35)
+    
+  + Heterocigosis:
+    + Al 10% (ExAC Freq Nfe <= 10)
+
+Se tendrán en cuenta aquellos genes en los que dichas columnas presenten efectos deletéreos, probablemente dañinos o posiblemente dañinos (“deleterious”, “probably damaging” o “possibly damaging”) dentro de las frecuencias alélicas tomadas como referencia.
+
+3- **ClinVar** en:
+
+  + Homocigosis:
+    + Al 5% (ExAC Freq Nfe <= 5)
+    + Al 35% (ExAC Freq Nfe <= 35)
+    
+  + Heterocigosis:
+    + Al 10% (ExAC Freq Nfe <= 10)
+
+```{r}
+#Recorre todos los nombres terminados en XLSX.
+for (archivo in archivos) 
+{
+  ########################### 1.- HOMOCIGOSIS ###########################
+  
+  #Lectura del archivo, concretamente su hoja "hom".
+  hom <- read_excel(archivo, sheet = "hom")
+  
+  #Preprocesamiento de la muestra
+  hom <- as.data.frame(hom)
+  #Transforma los valores "NA" en "NotAvailable"
+  hom[is.na(hom)] <- "NotAvailable" 
+                        
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  hom <- hom %>%
+    unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`, 
+          sep=" - ", remove=FALSE)
+  
+  # 1.1. FILTRO FRECUENCIA ALÉLICA EN HOMOCIGOSIS AL 5%
+  for (fila in 1:nrow(hom)) 
+  {
+   if (hom$`ExAC Freq Nfe`[fila] <= 5)
+    {
+        #La función file_path_sans_ext recoge el nombre del archivo sin su 
+        #extensión.
+        Vec_muestra_hom_5 <- c(Vec_muestra_hom_5,
+                               tools::file_path_sans_ext(archivo))
+        Vec_genes_hom_5 <- c(Vec_genes_hom_5, hom$Gene[fila])
+        Vec_variantes_hom_5 <- c(Vec_variantes_hom_5, hom$Variant[fila])
+        Vec_cromosomas_hom_5 <- c(Vec_cromosomas_hom_5, hom$Chr[fila])
+        Vec_coordenadas_hom_5 <- c(Vec_coordenadas_hom_5, hom$Coordinate[fila])
+        Vec_transcript_hom_5 <- c(Vec_transcript_hom_5, hom$Transcript[fila])
+        Vec_consequence_hom_5 <- c(Vec_consequence_hom_5,
+                                   hom$Consequence[fila])
+        Vec_prot_pos_aa_hom_5 <- c(Vec_prot_pos_aa_hom_5,
+                               hom$`ProteinPosition - Aminoacids`[fila])
+        Vec_sift_hom_5 <- c(Vec_sift_hom_5, hom$Sift[fila])
+        Vec_polyphen_hom_5 <- c(Vec_polyphen_hom_5, hom$PolyPhen[fila])
+        Vec_dbSNP_ID_hom_5 <- c(Vec_dbSNP_ID_hom_5, hom$`dbSNP ID`[fila])
+        Vec_frec_nfe_hom_5 <- c(Vec_frec_nfe_hom_5, hom$`ExAC Freq Nfe`[fila]) 
+        Vec_clinvar_signif_hom_5 <- c(Vec_clinvar_signif_hom_5, 
+                                  hom$`ClinVar Significance`[fila])
+    }
+  } 
+  
+  # 1.2. FILTROS SIFT Y POLYPHEN EN HOMOCIGOSIS AL 5%
+  
+  for (fila in 1:nrow(hom)) 
+  {
+    #CONDICIÓN 1: que el gen esté reconocido como "deleterious" ó
+    #CONDICIÓN 2: que el gen esté reconocido como "probably damaging" ó
+    #CONDICIÓN 3: que el gen esté reconocido como "possibly damaging"
+    
+    if (startsWith(hom$Sift[fila], "deleterious") ||
+        startsWith(hom$PolyPhen[fila], "probably damaging") ||
+        startsWith(hom$PolyPhen[fila], "possibly damaging")) 
+    {
+        if (hom$`ExAC Freq Nfe`[fila] <= 5) 
+        {
+          #La función file_path_sans_ext recoge el nombre del archivo sin su 
+          #extensión.
+          Vec_muestra_hom_5_SP <- c(Vec_muestra_hom_5_SP,
+                                tools::file_path_sans_ext(archivo))
+          Vec_genes_hom_5_SP <- c(Vec_genes_hom_5_SP, hom$Gene[fila])
+          Vec_variantes_hom_5_SP <- c(Vec_variantes_hom_5_SP,
+                                      hom$Variant[fila])
+          Vec_cromosomas_hom_5_SP <- c(Vec_cromosomas_hom_5_SP, hom$Chr[fila])
+          Vec_coordenadas_hom_5_SP <- c(Vec_coordenadas_hom_5_SP,
+                                    hom$Coordinate[fila])
+          Vec_transcript_hom_5_SP <- c(Vec_transcript_hom_5_SP,
+                                       hom$Transcript[fila])
+          Vec_consequence_hom_5_SP <- c(Vec_consequence_hom_5_SP,
+                                    hom$Consequence[fila])
+          Vec_prot_pos_aa_hom_5_SP <- c(Vec_prot_pos_aa_hom_5_SP, 
+                                 hom$`ProteinPosition - Aminoacids`[fila])
+          Vec_sift_hom_5_SP <- c(Vec_sift_hom_5_SP, hom$Sift[fila])
+          Vec_polyphen_hom_5_SP <- c(Vec_polyphen_hom_5_SP,
+                                     hom$PolyPhen[fila])
+          Vec_dbSNP_ID_hom_5_SP <- c(Vec_dbSNP_ID_hom_5_SP, 
+                                     hom$`dbSNP ID`[fila])
+          Vec_frec_nfe_hom_5_SP <- c(Vec_frec_nfe_hom_5_SP, 
+                                     hom$`ExAC Freq Nfe`[fila]) 
+          Vec_clinvar_signif_hom_5_SP <- c(Vec_clinvar_signif_hom_5_SP,
+                                    hom$`ClinVar Significance`[fila])
+        }
+    }
+  }
+  
+ 
+  # 1.3. FILTRO CLINVAR EN HOMOCIGOSIS AL 5%
+  
+  #Lectura del archivo, concretamente, su hoja "clinvar-hom".
+  hom_clinvar <- read_excel(archivo, sheet = "clinvar-hom")
+  
+  #Preprocesamiento de la muestra
+  hom_clinvar <- as.data.frame(hom_clinvar)
+  
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  hom_clinvar <- hom_clinvar %>%
+    unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`,
+          sep=" - ", remove=FALSE)
+  
+  #CONDICIÓN: Que la tabla no esté vacía.
+  if (nrow(hom_clinvar) != 0)
+  {
+    for (fila in 1:nrow(hom_clinvar))
+    {
+      if (hom_clinvar$`ExAC Freq Nfe`[fila] <= 5)
+      {
+        #La función file_path_sans_ext recoge el nombre del archivo sin su 
+        #extensión.
+        Vec_muestra_hom_5_CV <- c(Vec_muestra_hom_5_CV, 
+                              tools::file_path_sans_ext(archivo))
+        Vec_genes_hom_5_CV <- c(Vec_genes_hom_5_CV, hom_clinvar$Gene[fila])
+        Vec_variantes_hom_5_CV <- c(Vec_variantes_hom_5_CV,
+                                    hom_clinvar$Variant[fila])
+        Vec_cromosomas_hom_5_CV <- c(Vec_cromosomas_hom_5_CV,
+                                     hom_clinvar$Chr[fila])
+        Vec_coordenadas_hom_5_CV <- c(Vec_coordenadas_hom_5_CV,
+                                  hom_clinvar$Coordinate[fila])
+        Vec_transcript_hom_5_CV <- c(Vec_transcript_hom_5_CV,
+                                 hom_clinvar$Transcript[fila])
+        Vec_consequence_hom_5_CV <- c(Vec_consequence_hom_5_CV,
+                                  hom_clinvar$Consequence[fila])
+        Vec_prot_pos_aa_hom_5_CV <- c(Vec_prot_pos_aa_hom_5_CV,
+                            hom_clinvar$`ProteinPosition - Aminoacids`[fila])
+        sift_hom_5_CV <- c(sift_hom_5_CV, hom_clinvar$Sift[fila])
+        Vec_polyphen_hom_5_CV <- c(Vec_polyphen_hom_5_CV,
+                                   hom_clinvar$PolyPhen[fila])
+        Vec_dbSNP_ID_hom_5_CV <- c(Vec_dbSNP_ID_hom_5_CV,
+                               hom_clinvar$`dbSNP ID`[fila])
+        Vec_frec_nfe_hom_5_CV <- c(Vec_frec_nfe_hom_5_CV, 
+                               hom_clinvar$`ExAC Freq Nfe`[fila]) 
+        Vec_clinvar_signif_hom_5_CV <- c(Vec_clinvar_signif_hom_5_CV,
+                                  hom_clinvar$`ClinVar Significance`[fila])
+      }
+    }
+  }
+  
+  # 1.4. FILTRO FRECUENCIA ALÉLICA EN HOMOCIGOSIS AL 35%
+  for (fila in 1:nrow(hom))
+  {
+    if (hom$`ExAC Freq Nfe`[fila] <= 35)
+    {
+      #La función file_path_sans_ext recoge el nombre del archivo sin su 
+      #extensión.
+      Vec_muestra_hom_35 <- c(Vec_muestra_hom_35,
+                              tools::file_path_sans_ext(archivo))
+      Vec_genes_hom_35 <- c(Vec_genes_hom_35, hom$Gene[fila])
+      Vec_variantes_hom_35 <- c(Vec_variantes_hom_35, hom$Variant[fila])
+      Vec_cromosomas_hom_35 <- c(Vec_cromosomas_hom_35, hom$Chr[fila])
+      Vec_coordenadas_hom_35 <- c(Vec_coordenadas_hom_35,
+                                  hom$Coordinate[fila])
+      Vec_transcript_hom_35 <- c(Vec_transcript_hom_35, hom$Transcript[fila])
+      Vec_consequence_hom_35 <- c(Vec_consequence_hom_35,
+                                  hom$Consequence[fila])
+      Vec_prot_pos_aa_hom_35 <- c(Vec_prot_pos_aa_hom_35, 
+                              hom$`ProteinPosition - Aminoacids`[fila])
+      Vec_sift_hom_35 <- c(Vec_sift_hom_35, hom$Sift[fila])
+      Vec_polyphen_hom_35 <- c(Vec_polyphen_hom_35, hom$PolyPhen[fila])
+      Vec_dbSNP_ID_hom_35 <- c(Vec_dbSNP_ID_hom_35, hom$`dbSNP ID`[fila])
+      Vec_frec_nfe_hom_35 <- c(Vec_frec_nfe_hom_35, hom$`ExAC Freq Nfe`[fila]) 
+      Vec_clinvar_signif_hom_35 <- c(Vec_clinvar_signif_hom_35,
+                                 hom$`ClinVar Significance`[fila])
+    }
+  }
+  
+ 
+  # 1.5. FILTROS SIFT Y POLYPHEN EN HOMOCIGOSIS AL 35%
+  for (fila in 1:nrow(hom)) 
+  {
+     #CONDICIÓN 1: que el gen esté reconocido como "deleterious" ó
+     #CONDICIÓN 2: que el gen esté reconocido como "probably damaging" ó
+     #CONDICIÓN 3: que el gen esté reconocido como "possibly damaging"
+    if (startsWith(hom$Sift[fila], "deleterious") ||
+        startsWith(hom$PolyPhen[fila], "probably damaging") ||
+        startsWith(hom$PolyPhen[fila], "possibly damaging")) 
+    {
+      if (hom$`ExAC Freq Nfe`[fila] <= 35) 
+      {
+        #La función file_path_sans_ext recoge el nombre del archivo sin su 
+        #extensión.
+        Vec_muestra_hom_35_SP <- c(Vec_muestra_hom_35_SP,
+                               tools::file_path_sans_ext(archivo))
+        Vec_genes_hom_35_SP <- c(Vec_genes_hom_35_SP, hom$Gene[fila])
+        Vec_variantes_hom_35_SP <- c(Vec_variantes_hom_35_SP,
+                                     hom$Variant[fila])
+        Vec_cromosomas_hom_35_SP <- c(Vec_cromosomas_hom_35_SP, hom$Chr[fila])
+        Vec_coordenadas_hom_35_SP <- c(Vec_coordenadas_hom_35_SP,
+                                   hom$Coordinate[fila])
+        Vec_transcript_hom_35_SP <- c(Vec_transcript_hom_35_SP,
+                                  hom$Transcript[fila])
+        Vec_consequence_hom_35_SP <- c(Vec_consequence_hom_35_SP,
+                                   hom$Consequence[fila])
+        Vec_prot_pos_aa_hom_35_SP <- c(Vec_prot_pos_aa_hom_35_SP, 
+                                hom$`ProteinPosition - Aminoacids`[fila])
+        Vec_sift_hom_35_SP <- c(Vec_sift_hom_35_SP, hom$Sift[fila])
+        Vec_polyphen_hom_35_SP <- c(Vec_polyphen_hom_35_SP,
+                                    hom$PolyPhen[fila])
+        Vec_dbSNP_ID_hom_35_SP <- c(Vec_dbSNP_ID_hom_35_SP, 
+                                    hom$`dbSNP ID`[fila])
+        Vec_frec_nfe_hom_35_SP <- c(Vec_frec_nfe_hom_35_SP,
+                                hom$`ExAC Freq Nfe`[fila]) 
+        Vec_clinvar_signif_hom_35_SP <- c(Vec_clinvar_signif_hom_35_SP,
+                                   hom$`ClinVar Significance`[fila])
+      }
+    }
+  }
+  
+
+  # 1.6. FILTRO CLINVAR EN HOMOCIGOSIS AL 35%
+  
+  #CONDICIÓN: Que la tabla no esté vacía.
+  if (nrow(hom_clinvar) != 0)
+  {
+    for (fila in 1:nrow(hom_clinvar))
+    {
+      if (hom_clinvar$`ExAC Freq Nfe`[fila] <= 35)
+      {
+        #La función file_path_sans_ext recoge el nombre del archivo sin su 
+        #extensión.
+        Vec_muestra_hom_35_CV <- c(Vec_muestra_hom_35_CV,
+                               tools::file_path_sans_ext(archivo))
+        Vec_genes_hom_35_CV <- c(Vec_genes_hom_35_CV, hom_clinvar$Gene[fila])
+        Vec_variantes_hom_35_CV <- c(Vec_variantes_hom_35_CV,
+                                 hom_clinvar$Variant[fila])
+        Vec_cromosomas_hom_35_CV <- c(Vec_cromosomas_hom_35_CV,
+                                      hom_clinvar$Chr[fila])
+        Vec_coordenadas_hom_35_CV <- c(Vec_coordenadas_hom_35_CV,
+                                   hom_clinvar$Coordinate[fila])
+        Vec_transcript_hom_35_CV <- c(Vec_transcript_hom_35_CV,
+                                  hom_clinvar$Transcript[fila])
+        Vec_consequence_hom_35_CV <- c(Vec_consequence_hom_35_CV,
+                                   hom_clinvar$Consequence[fila])
+        Vec_prot_pos_aa_hom_35_CV <- c(Vec_prot_pos_aa_hom_35_CV, 
+                            hom_clinvar$`ProteinPosition - Aminoacids`[fila])
+        Vec_sift_hom_35_CV <- c(Vec_sift_hom_35_CV, hom_clinvar$Sift[fila])
+        Vec_polyphen_hom_35_CV <- c(Vec_polyphen_hom_35_CV,
+                                hom_clinvar$PolyPhen[fila])
+        Vec_dbSNP_ID_hom_35_CV <- c(Vec_dbSNP_ID_hom_35_CV,
+                                hom_clinvar$`dbSNP ID`[fila])
+        Vec_frec_nfe_hom_35_CV <- c(Vec_frec_nfe_hom_35_CV,
+                                hom_clinvar$`ExAC Freq Nfe`[fila]) 
+        Vec_clinvar_signif_hom_35_CV <- c(Vec_clinvar_signif_hom_35_CV,
+                                 hom_clinvar$`ClinVar Significance`[fila])
+      }
+    }
+  }
+
+  
+  ########################### 2.- HETEROCIGOSIS ###########################
+  
+  #Lectura del archivo, concretamente, su hoja "het_hemiz".
+  het <- read_excel(archivo, sheet = "het_hemiz")
+  
+  #Preprocesamiento de la muestra
+  het <- as.data.frame(het)
+  
+  #Transforma los valores "NA" en "NotAvailable"
+  het[is.na(het)] <- "NotAvailable" 
+
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  het <- het %>%
+  unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`,
+        sep=" - ", remove=FALSE)
+  
+  # 2.1. FILTRO FRECUENCIA ALÉLICA EN HETEROCIGOSIS AL 5%
+  for (fila in 1:nrow(het))
+  {
+    if (het$`ExAC Freq Nfe`[fila] <= 5)
+    {
+      #La función file_path_sans_ext recoge el nombre del archivo sin su 
+      #extensión.
+      Vec_muestra_het_5 <- c(Vec_muestra_het_5,
+                             tools::file_path_sans_ext(archivo))
+      Vec_genes_het_5 <- c(Vec_genes_het_5, het$Gene[fila])
+      Vec_variantes_het_5 <- c(Vec_variantes_het_5, het$Variant[fila])
+      Vec_cromosomas_het_5 <- c(Vec_cromosomas_het_5, het$Chr[fila])
+      Vec_coordenadas_het_5 <- c(Vec_coordenadas_het_5, het$Coordinate[fila])
+      Vec_transcript_het_5 <- c(Vec_transcript_het_5, het$Transcript[fila])
+      Vec_consequence_het_5 <- c(Vec_consequence_het_5, het$Consequence[fila])
+      Vec_prot_pos_aa_het_5 <- c(Vec_prot_pos_aa_het_5,
+                             het$`ProteinPosition - Aminoacids`[fila])
+      Vec_sift_het_5 <- c(Vec_sift_het_5, het$Sift[fila])
+      Vec_polyphen_het_5 <- c(Vec_polyphen_het_5, het$PolyPhen[fila])
+      Vec_dbSNP_ID_het_5 <- c(Vec_dbSNP_ID_het_5, het$`dbSNP ID`[fila])
+      Vec_frec_nfe_het_5 <- c(Vec_frec_nfe_het_5, het$`ExAC Freq Nfe`[fila]) 
+      Vec_clinvar_signif_het_5 <- c(Vec_clinvar_signif_het_5,
+                                het$`ClinVar Significance`[fila])
+    }
+  }
+  
+  # 2.2. FILTROS SIFT Y POLYPHEN EN HETEROCIGOSIS AL 5%
+  
+  for (fila in 1:nrow(het)) 
+  {
+    #CONDICIÓN 1: que el gen esté reconocido como "deleterious" ó
+    #CONDICIÓN 2: que el gen esté reconocido como "probably damaging" ó
+    #CONDICIÓN 3: que el gen esté reconocido como "possibly damaging"
+    
+    if (startsWith(het$Sift[fila], "deleterious") ||
+          startsWith(het$PolyPhen[fila], "probably damaging") ||
+          startsWith(het$PolyPhen[fila], "possibly damaging")) 
+    {
+      if (het$`ExAC Freq Nfe`[fila] <= 10) 
+      {
+        #La función file_path_sans_ext recoge el nombre del archivo sin su 
+        #extensión.
+        Vec_muestra_het_5_SP <- c(Vec_muestra_het_5_SP,
+                              tools::file_path_sans_ext(archivo))
+        Vec_genes_het_5_SP <- c(Vec_genes_het_5_SP, het$Gene[fila])
+        Vec_variantes_het_5_SP <- c(Vec_variantes_het_5_SP, het$Variant[fila])
+        Vec_cromosomas_het_5_SP <- c(Vec_cromosomas_het_5_SP, het$Chr[fila])
+        Vec_coordenadas_het_5_SP <- c(Vec_coordenadas_het_5_SP,
+                                  het$Coordinate[fila])
+        Vec_transcript_het_5_SP <- c(Vec_transcript_het_5_SP,
+                                     het$Transcript[fila])
+        Vec_consequence_het_5_SP <- c(Vec_consequence_het_5_SP,
+                                  het$Consequence[fila])
+        Vec_prot_pos_aa_het_5_SP <- c(Vec_prot_pos_aa_het_5_SP,
+                               het$`ProteinPosition - Aminoacids`[fila])
+        Vec_sift_het_5_SP <- c(Vec_sift_het_5_SP, het$Sift[fila])
+        Vec_polyphen_het_5_SP <- c(Vec_polyphen_het_5_SP, het$PolyPhen[fila])
+        Vec_dbSNP_ID_het_5_SP <- c(Vec_dbSNP_ID_het_5_SP, 
+                                   het$`dbSNP ID`[fila])
+        Vec_frec_nfe_het_5_SP <- c(Vec_frec_nfe_het_5_SP, 
+                                   het$`ExAC Freq Nfe`[fila]) 
+        Vec_clinvar_signif_het_5_SP <- c(Vec_clinvar_signif_het_5_SP,
+                                  het$`ClinVar Significance`[fila])
+      }
+    }
+  }
+  
+  # 2.3. FILTRO CLINVAR EN HETEROCIGOSIS AL 5%
+  
+  #Lectura del archivo, concretamente, su hoja "clinvar-het_hemiz".
+  het_clinvar <- read_excel(archivo, sheet = "clinvar-het_hemiz")
+
+  #Preprocesamiento de la muestra
+  het_clinvar <- as.data.frame(het_clinvar)
+  
+  #Unifica las columnas Protein Position y Amino Acids en una nueva, sin   
+  #borrar las anteriores.
+  het_clinvar <- het_clinvar %>%
+    unite("ProteinPosition - Aminoacids", `Protein Position`:`Amino Acids`,
+          sep=" - ", remove=FALSE)
+  
+  #CONDICIÓN: Que la tabla no esté vacía.
+  if (nrow(het_clinvar) != 0)
+  {
+    for (fila in 1:nrow(het_clinvar))
+    {
+      if (het_clinvar$`ExAC Freq Nfe`[fila] <= 10)
+      {
+        #La función file_path_sans_ext recoge el nombre del archivo sin su 
+        #extensión.
+        Vec_muestra_het_5_CV <- c(Vec_muestra_het_5_CV,
+                              tools::file_path_sans_ext(archivo))
+        Vec_genes_het_5_CV <- c(Vec_genes_het_5_CV, het_clinvar$Gene[fila])
+        Vec_variantes_het_5_CV <- c(Vec_variantes_het_5_CV,
+                                    het_clinvar$Variant[fila])
+        Vec_cromosomas_het_5_CV <- c(Vec_cromosomas_het_5_CV,
+                                     het_clinvar$Chr[fila])
+        Vec_coordenadas_het_5_CV <- c(Vec_coordenadas_het_5_CV,
+                                  het_clinvar$Coordinate[fila])
+        Vec_transcript_het_5_CV <- c(Vec_transcript_het_5_CV,
+                                 het_clinvar$Transcript[fila])
+        Vec_consequence_het_5_CV <- c(Vec_consequence_het_5_CV,
+                                  het_clinvar$Consequence[fila])
+        Vec_prot_pos_aa_het_5_CV <- c(Vec_prot_pos_aa_het_5_CV,
+                         het_clinvar$`ProteinPosition - Aminoacids`[fila])
+        Vec_sift_het_5_CV <- c(Vec_sift_het_5_CV, het_clinvar$Sift[fila])
+        Vec_polyphen_het_5_CV <- c(Vec_polyphen_het_5_CV,
+                                   het_clinvar$PolyPhen[fila])
+        Vec_dbSNP_ID_het_5_CV <- c(Vec_dbSNP_ID_het_5_CV, 
+                               het_clinvar$`dbSNP ID`[fila])
+        Vec_frec_nfe_het_5_CV <- c(Vec_frec_nfe_het_5_CV, 
+                               het_clinvar$`ExAC Freq Nfe`[fila]) 
+        Vec_clinvar_signif_het_5_CV <- c(Vec_clinvar_signif_het_5_CV,
+                                het_clinvar$`ClinVar Significance`[fila])
+      }
+    }
+  }
+}
+```
+
+## 6.1. GENERACIÓN DE LAS TABLAS UNA VEZ SON APLICADOS TODOS LOS FILTROS
+```{r}
+#Homocigosis al 5%
+tabla_hom_5 <- data.frame(Vec_muestra_hom_5, Vec_genes_hom_5, Vec_variantes_hom_5, Vec_cromosomas_hom_5, Vec_coordenadas_hom_5, Vec_transcript_hom_5, Vec_consequence_hom_5, Vec_prot_pos_aa_hom_5, Vec_sift_hom_5, Vec_polyphen_hom_5, Vec_dbSNP_ID_hom_5, Vec_frec_nfe_hom_5, Vec_clinvar_signif_hom_5)
+
+#Homocigosis al 5% + SIFT/Polyphen
+tabla_hom_5_SP <- data.frame(Vec_muestra_hom_5_SP, Vec_genes_hom_5_SP, Vec_variantes_hom_5_SP, Vec_cromosomas_hom_5_SP, Vec_coordenadas_hom_5_SP, Vec_transcript_hom_5_SP, Vec_consequence_hom_5_SP, Vec_prot_pos_aa_hom_5_SP, Vec_sift_hom_5_SP, Vec_polyphen_hom_5_SP, Vec_dbSNP_ID_hom_5_SP, Vec_frec_nfe_hom_5_SP, Vec_clinvar_signif_hom_5_SP)
+
+#Homocigosis al 5% + ClinVar
+tabla_hom_5_CV <- data.frame(Vec_muestra_hom_5_CV, Vec_genes_hom_5_CV, Vec_variantes_hom_5_CV, Vec_cromosomas_hom_5_CV, Vec_coordenadas_hom_5_CV, Vec_transcript_hom_5_CV, Vec_consequence_hom_5_CV, Vec_prot_pos_aa_hom_5_CV, Vec_sift_hom_5_CV, Vec_polyphen_hom_5_CV, Vec_dbSNP_ID_hom_5_CV, Vec_frec_nfe_hom_5_CV, Vec_clinvar_signif_hom_5_CV)
+
+#Homocigosis al 35%
+tabla_hom_35 <- data.frame(Vec_muestra_hom_35, Vec_genes_hom_35, Vec_variantes_hom_35, Vec_cromosomas_hom_35, Vec_coordenadas_hom_35, Vec_transcript_hom_35, Vec_consequence_hom_35, Vec_prot_pos_aa_hom_35, Vec_sift_hom_35, Vec_polyphen_hom_35, Vec_dbSNP_ID_hom_35, Vec_frec_nfe_hom_35, Vec_clinvar_signif_hom_35)
+
+#Homocigosis al 35% + SIFT/Polyphen
+tabla_hom_35_SP <- data.frame(Vec_muestra_hom_35_SP, Vec_genes_hom_35_SP, Vec_variantes_hom_35_SP, Vec_cromosomas_hom_35_SP, Vec_coordenadas_hom_35_SP, Vec_transcript_hom_35_SP, Vec_consequence_hom_35_SP, Vec_prot_pos_aa_hom_35_SP, Vec_sift_hom_35_SP, Vec_polyphen_hom_35_SP, Vec_dbSNP_ID_hom_35_SP, Vec_frec_nfe_hom_35_SP, Vec_clinvar_signif_hom_35_SP)
+
+#Homocigosis al 35% + ClinVar
+tabla_hom_35_CV <- data.frame(Vec_muestra_hom_35_CV, Vec_genes_hom_35_CV, Vec_variantes_hom_35_CV, Vec_cromosomas_hom_35_CV, Vec_coordenadas_hom_35_CV, Vec_transcript_hom_35_CV, Vec_consequence_hom_35_CV, Vec_prot_pos_aa_hom_35_CV, Vec_sift_hom_35_CV, Vec_polyphen_hom_35_CV, Vec_dbSNP_ID_hom_35_CV, Vec_frec_nfe_hom_35_CV, Vec_clinvar_signif_hom_35_CV)
+
+#Heterocigosis al 5%
+tabla_het_5 <- data.frame(Vec_muestra_het_5, Vec_genes_het_5, Vec_variantes_het_5, Vec_cromosomas_het_5, Vec_coordenadas_het_5, Vec_transcript_het_5, Vec_consequence_het_5, Vec_prot_pos_aa_het_5, Vec_sift_het_5, Vec_polyphen_het_5, Vec_dbSNP_ID_het_5, Vec_frec_nfe_het_5, Vec_clinvar_signif_het_5)
+
+#Heterocigosis al 5% + SIFT/Polyphen
+tabla_het_5_SP <- data.frame(Vec_muestra_het_5_SP, Vec_genes_het_5_SP, Vec_variantes_het_5_SP, Vec_cromosomas_het_5_SP, Vec_coordenadas_het_5_SP, Vec_transcript_het_5_SP, Vec_consequence_het_5_SP, Vec_prot_pos_aa_het_5_SP, Vec_sift_het_5_SP, Vec_polyphen_het_5_SP, Vec_dbSNP_ID_het_5_SP, Vec_frec_nfe_het_5_SP, Vec_clinvar_signif_het_5_SP)
+
+#Heterocigosis al 5% + ClinVar
+tabla_het_5_CV <- data.frame(Vec_muestra_het_5_CV, Vec_genes_het_5_CV, Vec_variantes_het_5_CV, Vec_cromosomas_het_5_CV, Vec_coordenadas_het_5_CV, Vec_transcript_het_5_CV, Vec_consequence_het_5_CV, Vec_prot_pos_aa_het_5_CV, Vec_sift_het_5_CV, Vec_polyphen_het_5_CV, Vec_dbSNP_ID_het_5_CV, Vec_frec_nfe_het_5_CV, Vec_clinvar_signif_het_5_CV)
+```
+
+
+Al igual que en el caso anterior, se utilizará la función llamada `funcion_aminoacidos` cargada al principio de este script, para trabajar con el formato "Aminoácido+Posición+Aminoácido".
+
+```{r}
+#Para poder hacer los procedimientos posteriores, es necesario pasar todas aquellas columnas que sean factores a carácter.
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_CV) != 0)
+{
+  tabla_hom_5_CV[sapply(tabla_hom_5_CV, is.factor)] <-
+    lapply(tabla_hom_5_CV[sapply(tabla_hom_5_CV, is.factor)], as.character)
+}
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_SP) != 0)
+{
+  tabla_hom_5_SP[sapply(tabla_hom_5_SP, is.factor)] <-
+    lapply(tabla_hom_5_SP[sapply(tabla_hom_5_SP, is.factor)], as.character)
+}
+
+tabla_het_5[sapply(tabla_het_5, is.factor)] <- lapply(tabla_het_5[sapply(tabla_het_5, is.factor)], as.character)
+
+tabla_het_5_SP[sapply(tabla_het_5_SP, is.factor)] <- lapply(tabla_het_5_SP[sapply(tabla_het_5_SP, is.factor)], as.character)
+
+tabla_het_5_CV[sapply(tabla_het_5_CV, is.factor)] <- lapply(tabla_het_5_CV[sapply(tabla_het_5_CV, is.factor)], as.character)
+
+tabla_hom_5[sapply(tabla_hom_5, is.factor)] <- lapply(tabla_hom_5[sapply(tabla_hom_5, is.factor)], as.character)
+
+tabla_hom_35[sapply(tabla_hom_35, is.factor)] <- lapply(tabla_hom_35[sapply(tabla_hom_35, is.factor)], as.character)
+
+tabla_hom_35_SP[sapply(tabla_hom_35_SP, is.factor)] <- lapply(tabla_hom_35_SP[sapply(tabla_hom_35_SP, is.factor)], as.character)
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_35_CV) != 0)
+{
+  tabla_hom_35_CV[sapply(tabla_hom_35_CV, is.factor)] <-
+    lapply(tabla_hom_35_CV[sapply(tabla_hom_35_CV, is.factor)], as.character)
+}
+
+
+#En las siguientes líneas de código se procederá a utilizar la función "funcion_aminoacidos" para cambiar las letras de aminoácidos por sus abreviaturas, así como ponerlo en orden (aminoácido+posición+aminoácido). Se hará en todas las tablas.
+
+
+#1) Tabla_hom_5
+
+i <- 1
+for (aminoacido_hom_5 in tabla_hom_5$Vec_prot_pos_aa_hom_5)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_hom_5)
+  tabla_hom_5$Vec_prot_pos_aa_hom_5[i] <- aminoacido_new
+  i <- i+1
+} 
+
+
+#2) Tabla_hom_5_SP
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_SP) != 0)
+{
+ i <- 1
+  for (aminoacido_hom_5_SP in tabla_hom_5_SP$Vec_prot_pos_aa_hom_5_SP)
+  {
+    aminoacido_new <- funcion_aminoacidos(aminoacido_hom_5_SP)
+    tabla_hom_5_SP$Vec_prot_pos_aa_hom_5_SP[i] <- aminoacido_new
+    i <- i+1
+  } 
+}
+
+#3) Tabla_hom_5_CV
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_CV) != 0)
+{
+  i <- 1
+  for (aminoacido_hom_5_CV in tabla_hom_5_CV$Vec_prot_pos_aa_hom_5_CV)
+  {
+    aminoacido_new <- funcion_aminoacidos(aminoacido_hom_5_CV)
+    tabla_hom_5_CV$Vec_prot_pos_aa_hom_5_CV[i] <- aminoacido_new
+    i <- i+1
+  } 
+}
+
+#4) Tabla_hom_35
+
+i <- 1
+for (aminoacido_hom_35 in tabla_hom_35$Vec_prot_pos_aa_hom_35)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_hom_35)
+  tabla_hom_35$Vec_prot_pos_aa_hom_35[i] <- aminoacido_new
+  i <- i+1
+} 
+
+
+#5) Tabla_hom_35_SP
+
+i <- 1
+for (aminoacido_hom_35_SP in tabla_hom_35_SP$Vec_prot_pos_aa_hom_35_SP)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_hom_35_SP)
+  tabla_hom_35_SP$Vec_prot_pos_aa_hom_35_SP[i] <- aminoacido_new
+  i <- i+1
+} 
+
+
+#6) Tabla_hom_35_CV
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_35_CV) != 0)
+{
+  i <- 1
+  for (aminoacido_hom_35_CV in tabla_hom_35_CV$Vec_prot_pos_aa_hom_35_CV)
+  {
+    aminoacido_new <- funcion_aminoacidos(aminoacido_hom_35_CV)
+    tabla_hom_35_CV$Vec_prot_pos_aa_hom_35_CV[i] <- aminoacido_new
+    i <- i+1
+  } 
+}
+
+
+#7) Tabla_het_5
+
+i <- 1
+for (aminoacido_het_5 in tabla_het_5$Vec_prot_pos_aa_het_5)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_het_5)
+  tabla_het_5$Vec_prot_pos_aa_het_5[i] <- aminoacido_new
+  i <- i+1
+} 
+
+
+#8) Tabla_het_5_SP
+
+i <- 1
+for (aminoacido_het_5_SP in tabla_het_5_SP$Vec_prot_pos_aa_het_5_SP)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_het_5_SP)
+  tabla_het_5_SP$Vec_prot_pos_aa_het_5_SP[i] <- aminoacido_new
+  i <- i+1
+} 
+
+#9) Tabla_het_5_CV
+
+i <- 1
+for (aminoacido_het_5_CV in tabla_het_5_CV$Vec_prot_pos_aa_het_5_CV)
+{
+  aminoacido_new <- funcion_aminoacidos(aminoacido_het_5_CV)
+  tabla_het_5_CV$Vec_prot_pos_aa_het_5_CV[i] <- aminoacido_new
+  i <- i+1
+} 
+```
+
+Cambiamos el nombre de las columnas de cada tabla:
+```{r}
+colnames(tabla_hom_5) <- c("Sample", "Gene_Hom_5", "Variant_Hom_5", "Chr_Hom_5", "Coordinate_Hom_5", "Transcript_Hom_5", "Consequence_Hom_5", "Protein_Position - AminoAcids_Hom_5", "Sift_Hom_5", "PolyPhen_Hom_5", "dbSNP_ID_Hom_5", "ExACFreqNfe_Hom_5", "ClinVar-Significance_Hom_5")
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_CV) != 0)
+{
+  colnames(tabla_hom_5_CV) <- c("Sample", "Gene_Hom_5_CV", "Variant_Hom_5_CV", "Chr_Hom_5_CV", "Coordinate_Hom_5_CV", "Transcript_Hom_5_CV", "Consequence_Hom_5_CV", "Protein_Position - AminoAcids_Hom_5_CV", "Sift_Hom_5_CV", "PolyPhen_Hom_5_CV", "dbSNP_ID_Hom_5_CV", "ExACFreqNfe_Hom_5_CV", "ClinVar-Significance_Hom_5_CV")
+}
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_SP) != 0)
+{
+  colnames(tabla_hom_5_SP) <- c("Sample", "Gene_Hom_5_SP", "Variant_Hom_5_SP", "Chr_Hom_5_SP", "Coordinate_Hom_5_SP", "Transcript_Hom_5_SP", "Consequence_Hom_5_SP", "Protein_Position - AminoAcids_Hom_5_SP", "Sift_Hom_5_SP", "PolyPhen_Hom_5_SP", "dbSNP_ID_Hom_5_SP", "ExACFreqNfe_Hom_5_SP", "ClinVar-Significance_Hom_5_SP")
+}
+
+colnames(tabla_hom_35) <- c("Sample", "Gene_Hom_35", "Variant_Hom_35", "Chr_Hom_35", "Coordinate_Hom_35", "Transcript_Hom_35", "Consequence_Hom_35", "Protein_Position - AminoAcids_Hom_35", "Sift_Hom_35", "PolyPhen_Hom_35", "dbSNP_ID_Hom_35", "ExACFreqNfe_Hom_35", "ClinVar-Significance_Hom_35")
+
+colnames(tabla_hom_35_SP) <- c("Sample", "Gene_Hom_35_SP", "Variant_Hom_35_SP", "Chr_Hom_35_SP", "Coordinate_Hom_35_SP", "Transcript_Hom_35_SP", "Consequence_Hom_35_SP", "Protein_Position - AminoAcids_Hom_35_SP", "Sift_Hom_35_SP", "PolyPhen_Hom_35_SP", "dbSNP_ID_Hom_35_SP", "ExACFreqNfe_Hom_35_SP", "ClinVar-Significance_Hom_35_SP")
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_35_CV) != 0)
+{
+  colnames(tabla_hom_35_CV) <- c("Sample", "Gene_Hom_35_CV", "Variant_Hom_35_CV", "Chr_Hom_35_CV", "Coordinate_Hom_35_CV", "Transcript_Hom_35_CV", "Consequence_Hom_35_CV", "Protein_Position - AminoAcids_Hom_35_CV", "Sift_Hom_35_CV", "PolyPhen_Hom_35_CV", "dbSNP_ID_Hom_35_CV", "ExACFreqNfe_Hom_35_CV", "ClinVar-Significance_Hom_35_CV")
+}
+
+colnames(tabla_het_5) <- c("Sample", "Gene_Het_5", "Variant_Het_5", "Chr_Het_5", "Coordinate_Het_5", "Transcript_Het_5", "Consequence_Het_5", "Protein_Position - AminoAcids_Het_5", "Sift_Het_5", "PolyPhen_Het_5", "dbSNP_ID_Het_5", "ExACFreqNfe_Het_5", "ClinVar-Significance_Het_5")
+
+colnames(tabla_het_5_SP) <- c("Sample", "Gene_Het_5_SP", "Variant_Het_5_SP", "Chr_Het_5_SP", "Coordinate_Het_5_SP", "Transcript_Het_5_SP", "Consequence_Het_5_SP", "Protein_Position - AminoAcids_Het_5_SP", "Sift_Het_5_SP", "PolyPhen_Het_5_SP", "dbSNP_ID_Het_5_SP", "ExACFreqNfe_Het_5_SP", "ClinVar-Significance_Het_5_SP")
+
+colnames(tabla_het_5_CV) <- c("Sample", "Gene_Het_5_CV", "Variant_Het_5_CV", "Chr_Het_5_CV", "Coordinate_Het_5_CV", "Transcript_Het_5_CV", "Consequence_Het_5_CV", "Protein_Position - AminoAcids_Het_5_CV", "Sift_Het_5_CV", "PolyPhen_Het_5_CV", "dbSNP_ID_Het_5_CV", "ExACFreqNfe_Het_5_CV", "ClinVar-Significance_Het_5_CV")
+```
+
+
+## 6.2. GENERACIÓN DE ARCHIVOS XLSX
+```{r}
+write_xlsx(tabla_hom_5, path = "./Excels_Script/Filtros/Homocigotos_5.xlsx")
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_CV) != 0)
+{
+  write_xlsx(tabla_hom_5_CV, path = "./Excels_Script/Filtros/Homocigotos_5_CV.xlsx")
+}
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_SP) != 0)
+{
+  write_xlsx(tabla_hom_5_SP, path = "./Excels_Script/Filtros/Homocigotos_5_SP.xlsx")
+}
+
+write_xlsx(tabla_hom_35, path = "./Excels_Script/Filtros/Homocigotos_35.xlsx")
+
+write_xlsx(tabla_hom_35_SP, path = "./Excels_Script/Filtros/Homocigotos_35_SP.xlsx")
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_35_CV) != 0)
+{
+  write_xlsx(tabla_hom_35_CV, path = "./Excels_Script/Filtros/Homocigotos_35_CV.xlsx")
+}
+  
+write_xlsx(tabla_het_5, path = "./Excels_Script/Filtros/Heterocigotos_5.xlsx")
+
+write_xlsx(tabla_het_5_SP, path = "./Excels_Script/Filtros/Heterocigotos_5_SP.xlsx")
+
+write_xlsx(tabla_het_5_CV, path = "./Excels_Script/Filtros/Heterocigotos_5_CV.xlsx")
+```
+
+
+# 7. HOMOCIGOSIS Y/O HETEROCIGOSIS COMPUESTA
+
+Hace referencia a aquellos individuos que tienen dos alelos anormales o mutados diferentes en un mismo locus, uno en cada cromosoma, normalmente afectados por una enfermedad autosómica recesiva.
+Este "fenómeno" se estudia en heterocigosis y homocigosis.
+
+Los homocigotos y heterocigotos compuestos se buscan de aquellos que han sido seleccionados según los filtros de "Frecuencia alélica" y los métodos de predicción de patogenicidad SIFT y PolyPhen.
+
+En cada filtro, se guarda en distintas variables información del archivo inicial, siempre y cuando cumpla los criterios establecidos. Con esas variables se crearán tablas mucho más visuales, donde se podrá ver toda la información conjunta. Posteriormente, será recogida en distintos ficheros XLSX.
+
+## 7.1. HOMOCIGOSIS COMPUESTA AL 5%
+
+Se utilizará la `tabla_hom_5` con el objetivo de buscar aquellas muestras que tienen genes separados por una coma. Hay genes separados por una coma porque la variante afecta a dos transcritos de dos genes, uno de ellos coincide en la misma localización que el que realmente ha sido seleccionado por estar involucrado en la glicosilación.
+
+Dado que solo nos interesa el gen que participa en la glicosilación, aquellos genes que presenten esta característica (que estén separados por una coma), se borrará el gen que no está involucrado y se quedará el que sí lo está.
+
+Para ello, utilizaremos la función `sub()`, que buscará aquellos genes que contengan un guión (por ejemplo, IDI2-AS1) y nos mostrará el gen que no lo tiene. En el ejemplo IDI2-AS1,IDI1, nos devolvería IDI1.
+Así mismo, se utilizará la función `strsplit()`, que divide los elementos de un vector de caracteres. Lo utilizaremos para aquellos genes que se encuentran separados por una coma.
+Estas dos funciones estarán en variables diferentes, la primera en la variable "primer patrón" y la segunda en "segundo patrón".
+
+Ejemplo 1: si tenemos el gen "TEX9,MNS1":
+
+- Primer patrón: MNS1
+- Segundo patrón: TEX9
+
+Ejemplo 2: si tenemos el gen "IDI2-AS1,IDI1"
+
+- Primer patrón: IDI1
+- Segundo patrón: IDI2-AS1
+
+Posteriormente, ambos patrones se consultarán si se encuentran en el panel de genes. Si alguno de ellos está, el gen inicial de esa tabla será reemplazado por el gen que se encuentra en el patrón.
+Es decir, si el gen inicial es "TEX9,MNS1"; como solo MNS1 está implicado en la ruta de glicosilación, el gen inicial será reemplazado por "MNS1".
+
+```{r}
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5) != 0)
+{
+  #Como la tabla_hom_5 sufrirá cambios, tenemos que hacer una copia.
+  tabla_hom_5_copia <- tabla_hom_5
+
+  for (fila_hom in 1:nrow(tabla_hom_5_copia))
+  {
+    #CONDICIÓN: Que el gen esté separado por una coma. 
+    if (str_count(tabla_hom_5_copia$Gene_Hom_5[fila_hom], ',') == 1)
+    {
+      primer_patron_hom_5 <- sub(".*,", "",
+                             tabla_hom_5_copia$Gene_Hom_5[fila_hom])
+      segundo_patron_hom_5 <-
+      sapply(strsplit(tabla_hom_5_copia$Gene_Hom_5[fila_hom], ","), "[", 1)
+      
+      #CONDICIÓN: Que el primer patrón se encuentre en el panel de genes.
+      if (primer_patron_hom_5 %in% panel_genes$Gen)
+      {
+        tabla_hom_5_copia$Gene_Hom_5[fila_hom] <- primer_patron_hom_5
+      }
+      
+      #CONDICIÓN: Que el segundo patrón se encuentre en el panel de genes.
+      if (segundo_patron_hom_5 %in% panel_genes$Gen)
+      {
+        tabla_hom_5_copia$Gene_Hom_5[fila_hom] <- segundo_patron_hom_5
+      }
+    }
+  }
+}
+
+#Ordenamos alfabéticamente por genes.
+tabla_hom_5_copia <- tabla_hom_5_copia[order(tabla_hom_5_copia$Gene_Hom_5),]
+
+#Eliminamos la columna de rownames (porque está desordenada) y se crea una nueva, ordenada.
+row.names(tabla_hom_5_copia) <- 1:nrow(tabla_hom_5_copia)
+```
+
+Para sacar los homocigotos compuestos, se utilizará la función `filter` y la función `lead-lag` para encontrar los valores "siguiente" y "anterior" de un vector. Si hay dos genes que se encuentren repetidos y sean de la misma muestra, se guardarán en la tabla `tabla_hom_5_comp`.
+
+```{r}
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_copia) != 0)
+{
+  tabla_hom_5_comp <- tabla_hom_5_copia %>% filter(Sample == lag(Sample) | Sample == lead(Sample), Gene_Hom_5 == lag(Gene_Hom_5) | Gene_Hom_5 == lead(Gene_Hom_5))
+
+  #Ordenamos por muestras
+  tabla_hom_5_comp <- tabla_hom_5_comp[order(tabla_hom_5_comp$Sample),]
+}
+```
+
+
+## 7.2. HOMOCIGOSIS COMPUESTA AL 35%
+
+Se llevará a cabo el mismo procedimiento explicado en el apartado 7.1. No obstante, aquí se utilizará la `tabla_hom_35`.
+
+```{r}
+#Como la tabla_hom_35 sufrirá cambios, tenemos que hacer una copia.
+tabla_hom_35_copia <- tabla_hom_35
+
+for (fila_hom in 1:nrow(tabla_hom_35_copia))
+{
+  #CONDICIÓN: Que el gen se encuentre separado por una coma.
+  if (str_count(tabla_hom_35_copia$Gene_Hom_35[fila_hom], ',') == 1)
+  {
+    primer_patron_hom_35 <- sub(".*,", "",
+                               tabla_hom_35_copia$Gene_Hom_35[fila_hom])
+    segundo_patron_hom_35 <-
+      sapply(strsplit(tabla_hom_35_copia$Gene_Hom_35[fila_hom], ","), 
+             "[", 1)
+    
+    #CONDICIÓN: Que el primer patrón se encuentre en el panel de genes.
+    if (primer_patron_hom_35 %in% panel_genes$Gen)
+    {
+      tabla_hom_35_copia$Gene_Hom_35[fila_hom] <- primer_patron_hom_35
+    }
+    
+    #CONDICIÓN: Que el segundo patrón se encuentre en el panel de genes.
+    if (segundo_patron_hom_35 %in% panel_genes$Gen)
+    {
+      tabla_hom_35_copia$Gene_Hom_35[fila_hom] <- segundo_patron_hom_35
+    }
+  }
+}
+
+#Ordenamos alfabéticamente por genes.
+tabla_hom_35_copia <- tabla_hom_35_copia[order(tabla_hom_35_copia$Gene_Hom_35),]
+
+#Eliminamos la columna de rownames (porque está desordenada) y se crea una nueva, ordenada.
+row.names(tabla_hom_35_copia) <- 1:nrow(tabla_hom_35_copia)
+```
+
+
+```{r}
+tabla_hom_35_comp <- tabla_hom_35_copia %>% filter(Sample == lag(Sample) | Sample == lead(Sample), Gene_Hom_35 == lag(Gene_Hom_35) | Gene_Hom_35 == lead(Gene_Hom_35))
+
+#Ordenamos por muestras
+tabla_hom_35_comp <- tabla_hom_35_comp[order(tabla_hom_35_comp$Sample),]
+```
+
+
+## 7.3. HETEROCIGOSIS COMPUESTA AL 5%
+
+Para poder calcular cuántos individuos presentan heterocigosis compuesta, necesitamos juntar la `tabla_het_5` y la `tabla_het_5_SP`, ya que esta última contiene individuos que no presenta la `tabla_het_5`.
+
+Para ello, se recorrerá la `tabla_het_5_SP` mediante un bucle for, y se seleccionarán aquellos individuos que presenten una frecuencia alélica mayor a 5. 
+
+¿Por qué mayor a 5 y no menor a 10? Porque la `tabla_het_5_SP` solo tiene pacientes con una frecuencia alélica menor a 10 y ÚNICAMENTE necesitamos los que son mayores a 5, ya que la `tabla_het_5` contiene los pacientes menores o iguales a 5.
+
+```{r}
+for (fila_hetSP in 1:nrow(tabla_het_5_SP))
+{
+  #CONDICIÓN: Que tenga una frecuencia alélica mayor a 5.
+  if (tabla_het_5_SP$ExACFreqNfe_Het_5_SP[fila_hetSP] > 5)
+    {
+    Vec_muestra_het_5_total <- c(Vec_muestra_het_5_total, 
+                              tabla_het_5_SP$Sample[fila_hetSP])
+    Vec_genes_het_5_total <- c(Vec_genes_het_5_total,
+                             tabla_het_5_SP$Gene_Het_5_SP[fila_hetSP])
+    Vec_variantes_het_5_total <- c(Vec_variantes_het_5_total,
+                            tabla_het_5_SP$Variant_Het_5_SP[fila_hetSP])
+    Vec_cromosomas_het_5_total <- c(Vec_cromosomas_het_5_total,
+                                  tabla_het_5_SP$Chr_Het_5_SP[fila_hetSP])
+    Vec_coordenadas_het_5_total <- c(Vec_coordenadas_het_5_total,
+                            tabla_het_5_SP$Coordinate_Het_5_SP[fila_hetSP])
+    Vec_transcript_het_5_total <- c(Vec_transcript_het_5_total,
+                          tabla_het_5_SP$Transcript_Het_5_SP[fila_hetSP])
+    Vec_consequence_het_5_total <- c(Vec_consequence_het_5_total,
+                          tabla_het_5_SP$Consequence_Het_5_SP[fila_hetSP])
+    Vec_prot_pos_aa_het_5_total <- c(Vec_prot_pos_aa_het_5_total,
+          tabla_het_5_SP$`Protein_Position - AminoAcids_Het_5`[fila_hetSP])
+    Vec_sift_het_5_total <- c(Vec_sift_het_5_total,
+                            tabla_het_5_SP$Sift_Het_5_SP[fila_hetSP])
+    Vec_polyphen_het_5_total <- c(Vec_polyphen_het_5_total,
+                              tabla_het_5_SP$PolyPhen_Het_5_SP[fila_hetSP])
+    Vec_dbSNP_ID_het_5_total <- c(Vec_dbSNP_ID_het_5_total,
+                              tabla_het_5_SP$dbSNP_ID_Het_5_SP[fila_hetSP])
+    Vec_frec_nfe_het_5_total <- c(Vec_frec_nfe_het_5_total,
+                        tabla_het_5_SP$ExACFreqNfe_Het_5_SP[fila_hetSP])
+    Vec_clinvar_signif_het_5_total <- c(Vec_clinvar_signif_het_5_total,
+                tabla_het_5_SP$`ClinVar-Significance_Het_5_SP`[fila_hetSP])
+  }
+}
+```
+
+Una vez obtenido los resultados, se procederá a crear el dataframe.
+```{r}
+df_het_5_SP <- data.frame(Vec_muestra_het_5_total, Vec_genes_het_5_total, Vec_variantes_het_5_total, Vec_cromosomas_het_5_total, Vec_coordenadas_het_5_total, Vec_transcript_het_5_total, Vec_consequence_het_5_total, Vec_prot_pos_aa_het_5_total, Vec_sift_het_5_total, Vec_polyphen_het_5_total, Vec_dbSNP_ID_het_5_total, Vec_frec_nfe_het_5_total,Vec_clinvar_signif_het_5_total)
+
+#Para poder combinar posteriormente la tabla_het_5 y df_SP, es necesario que tengan los mismos nombres en las columnas. Por ello, tenemos que cambiar el nombre a la tabla que acabamos de crear.
+colnames(df_het_5_SP) <- c("Sample", "Gene_Het_5", "Variant_Het_5", "Chr_Het_5", "Coordinate_Het_5", "Transcript_Het_5", "Consequence_Het_5", "Protein_Position - AminoAcids_Het_5", "Sift_Het_5", "PolyPhen_Het_5", "dbSNP_ID_Het_5", "ExACFreqNfe_Het_5", "ClinVar-Significance_Het_5")
+```
+
+Mediante la función `rbdin` combinamos la `tabla_het_5`y la que se acaba de crear para poder trabajar con una sola.
+```{r}
+tabla_het_5_y_SP <- rbind(tabla_het_5, df_het_5_SP)
+#Ordenamos por muestra
+tabla_het_5_y_SP <- tabla_het_5_y_SP[order(tabla_het_5_y_SP$Sample),]
+
+#Como la tabla_hom_35 sufrirá cambios, tenemos que hacer una copia.
+tabla_het_5_y_SP_copia <- tabla_het_5_y_SP
+```
+
+A continuación, será realizado el mismo proceso que se ha realizado en los apartados 7.1 y 7.2. En este caso, se utilizará la `tabla_het_5_y_SP`. 
+
+```{r}
+for (fila_het in 1:nrow(tabla_het_5_y_SP_copia))
+{
+  
+  #CONDICIÓN: Que el gen se encuentre separado por una coma. 
+  if (str_count(tabla_het_5_y_SP_copia$Gene_Het_5[fila_het], ',') == 1)
+  {
+    primer_patron_het <- sub(".*,", "",
+                               tabla_het_5_y_SP_copia$Gene_Het_5[fila_het])
+    segundo_patron_het <-
+      sapply(strsplit(tabla_het_5_y_SP_copia$Gene_Het_5[fila_het], ","),
+             "[", 1)
+    
+    #CONDICIÓN: Que el primer patrón se encuentre en el panel de genes.
+    if (primer_patron_het %in% panel_genes$Gen)
+    {
+      tabla_het_5_y_SP_copia$Gene_Het_5[fila_het] <- primer_patron_het
+    }
+    
+    #CONDICIÓN: Que el segundo patrón se encuentre en el panel de genes.
+    if (segundo_patron_het %in% panel_genes$Gen)
+    {
+      tabla_het_5_y_SP_copia$Gene_Het_5[fila_het] <- primer_patron_het
+    }
+  }
+}
+
+#Ordenamos por muestra, de menor a mayor.
+tabla_het_5_y_SP_copia <- tabla_het_5_y_SP_copia[order(tabla_het_5_y_SP_copia$Sample),]
+
+#Eliminamos la columna de rownames (porque está desordenada) y se crea una nueva, ordenada.
+row.names(tabla_het_5_y_SP_copia) <- 1:nrow(tabla_het_5_y_SP_copia)
+
+#Para poder hacer el paso posterior, necesitamos ordenar los genes.
+tabla_het_5_y_SP_copia <- tabla_het_5_y_SP_copia[order(tabla_het_5_y_SP_copia$Gene_Het_5),]
+```
+
+
+```{r}
+tabla_het_5_comp <- tabla_het_5_y_SP_copia %>% filter(Sample == lag(Sample) | Sample == lead(Sample), Gene_Het_5 == lag(Gene_Het_5) | Gene_Het_5 == lead(Gene_Het_5))
+
+#Ordenamos por muestras
+tabla_het_5_comp <- tabla_het_5_comp[order(tabla_het_5_comp$Sample),]
+```
+
+Cambiamos el nombre de las columnas de cada una de las tablas.
+```{r}
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_comp) != 0)
+{
+  colnames(tabla_hom_5_comp) <- c("Sample", "Gene_Hom_5_Comp", "Variant_Hom_5_Comp", "Chr_Hom_5_Comp", "Coordinate_Hom_5_Comp", "Transcript_Hom_5_Comp", "Consequence_Hom_5_Comp", "Protein_Position - AminoAcids_Hom_5_Comp", "Sift_Hom_5_Comp", "PolyPhen_Hom_5_Comp", "dbSNP_ID_Hom_5_Comp", "ExACFreqNfe_Hom_5_Comp", "ClinVar-Significance_Hom_5_Comp")
+}
+
+colnames(tabla_hom_35_comp) <- c("Sample", "Gene_Hom_35_Comp", "Variant_Hom_35_Comp", "Chr_Hom_35_Comp", "Coordinate_Hom_35_Comp", "Transcript_Hom_35_Comp", "Consequence_Hom_35_Comp", "Protein_Position - AminoAcids_Hom_35_Comp", "Sift_Hom_35_Comp", "PolyPhen_Hom_35_Comp", "dbSNP_ID_Hom_35_Comp", "ExACFreqNfe_Hom_35_Comp", "ClinVar-Significance_Hom_35_Comp")
+
+colnames(tabla_het_5_comp) <- c("Sample", "Gene_Het_5_Comp", "Variant_Het_5_Comp", "Chr_Het_5_Comp", "Coordinate_Het_5_Comp", "Transcript_Het_5_Comp", "Consequence_Het_5_Comp", "Protein_Position - AminoAcids_Het_5_Comp", "Sift_Het_5_Comp", "PolyPhen_Het_5_Comp", "dbSNP_ID_Het_5_Comp", "ExACFreqNfe_Het_5_Comp", "ClinVar-Significance_Het_5_Comp")
+```
+
+# 7.4. GENERACIÓN DE ARCHIVOS XLSX
+```{r}
+# HOMOCIGOSIS COMPUESTA AL 5%
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_5_comp) != 0)
+{
+  write_xlsx(tabla_hom_5_comp, path = "./Excels_Script/Het-Hom_Compuesta/HomocigosisCompuesta_5.xlsx")
+}
+
+# HOMOCIGOSIS COMPUESTA AL 35%
+write_xlsx(tabla_hom_35_comp, path = "./Excels_Script/Het-Hom_Compuesta/HomocigosisCompuesta_35.xlsx")
+
+# HETEROCIGOSIS COMPUESTA AL 5%
+write_xlsx(tabla_het_5_comp, path = "./Excels_Script/Het-Hom_Compuesta/HeterocigosisCompuesta_5.xlsx")
+```
+
+
+# 8. GENES IGUALES EN HOMOCIGOSIS Y HETEROCIGOSIS (QUE ESTÉN SELECCIONADOS)
+
+Con el objetivo de estudiar la posibilidad de que existan genes seleccionados según los porcentajes de frecuencia alélica establecidos, en homocigosis y heterocigosis se ha establecido el siguiente código.
+
+Consta de dos bucles for, que recorren las tablas: `tabla_het_5_y_SP` y `tabla_hom_35` y mira dos condiciones:
+
+1) Que el gen sea el mismo.
+2) Que la muestra sea la misma.
+
+En caso afirmativo para ambas condiciones, se guardarán la muestra, genes y su correspondiente información en las variables detalladas en el código.
+Posteriormente, se creará un tabla con los resultados obtenidos.
+
+```{r}
+#Como necesitamos comparar con la tabla_het_5 y tabla_het_5_SP, utilizaremos la tabla ya creada (tabla_het_5_y_SP). Dado que está desordenada, es necesario ordenarla por muestra. 
+tabla_het_5_y_SP <- tabla_het_5_y_SP[order(tabla_het_5_y_SP$Sample),]
+
+#Eliminamos la columna de rownames (porque está desordenada) y se crea una nueva, ordenada.
+row.names(tabla_het_5_y_SP) <- 1:nrow(tabla_het_5_y_SP)
+```
+
+```{r}
+for (fila_hom in 1:nrow(tabla_hom_35))
+{
+  for (fila_het in 1:nrow(tabla_het_5_y_SP))
+  {
+    #CONDICIÓN 1: El gen es el mismo.
+    #CONDICIÓN 2: La muestra es la misma.
+    if ((tabla_hom_35$Gene_Hom_35[fila_hom] 
+         == tabla_het_5_y_SP$Gene_Het_5[fila_het]) &
+        (tabla_hom_35$Sample[fila_hom] == tabla_het_5_y_SP$Sample[fila_het]))
+    {
+      Vec_muestras_iguales <- c(Vec_muestras_iguales,
+                                tabla_hom_35$Sample[fila_hom])
+      Vec_gen_hom_ig <- c(Vec_gen_hom_ig, tabla_hom_35$Gene_Hom_35[fila_hom])
+      Vec_gen_het_ig <- c(Vec_gen_het_ig,
+                          tabla_het_5_y_SP$Gene_Het_5[fila_het])
+      Vec_variantes_het_ig <- c(Vec_variantes_het_ig,
+                                tabla_het_5_y_SP$Variant_Het_5[fila_het])
+      Vec_variantes_hom_ig <- c(Vec_variantes_hom_ig,
+                             tabla_hom_35$Variant_Hom_35[fila_hom])
+      Vec_cromosomas_het_ig <- c(Vec_cromosomas_het_ig,
+                                 tabla_het_5_y_SP$Chr_Het_5[fila_het])
+      Vec_cromosomas_hom_ig <- c(Vec_cromosomas_hom_ig,
+                                 tabla_hom_35$Chr_Hom_35[fila_hom])
+      Vec_coordenadas_het_ig <- c(Vec_coordenadas_het_ig,
+                               tabla_het_5_y_SP$Coordinate_Het_5[fila_het])
+      Vec_coordenadas_hom_ig <- c(Vec_coordenadas_hom_ig,
+                               tabla_hom_35$Coordinate_Hom_35[fila_hom])
+      Vec_transcript_het_ig <- c(Vec_transcript_het_ig,
+                              tabla_het_5_y_SP$Transcript_Het_5[fila_het])
+      Vec_transcript_hom_ig <- c(Vec_transcript_hom_ig,
+                              tabla_hom_35$Transcript_Hom_35[fila_hom])
+      Vec_consequence_het_ig <- c(Vec_consequence_het_ig,
+                               tabla_het_5_y_SP$Consequence_Het_5[fila_het])
+      Vec_consequence_hom_ig <- c(Vec_consequence_hom_ig, 
+                               tabla_hom_35$Consequence_Hom_35[fila_hom])
+      Vec_prot_pos_aa_het_ig <- c(Vec_prot_pos_aa_het_ig, 
+              tabla_het_5_y_SP$`Protein_Position - AminoAcids_Het_5`[fila_het])
+      Vec_prot_pos_aa_hom_ig <- c(Vec_prot_pos_aa_hom_ig, 
+                tabla_hom_35$`Protein_Position - AminoAcids_Hom_35`[fila_hom])
+      Vec_sift_het_ig <- c(Vec_sift_het_ig,
+                           tabla_het_5_y_SP$Sift_Het_5[fila_het])
+      Vec_sift_hom_ig <- c(Vec_sift_hom_ig, tabla_hom_35$Sift_Hom_35[fila_hom])
+      Vec_polyphen_het_ig <- c(Vec_polyphen_het_ig,
+                            tabla_het_5_y_SP$PolyPhen_Het_5[fila_het])
+      Vec_polyphen_hom_ig <- c(Vec_polyphen_hom_ig,
+                            tabla_hom_35$PolyPhen_Hom_35[fila_hom])
+      Vec_dbSNP_ID_het_ig <- c(Vec_dbSNP_ID_het_ig,
+                            tabla_het_5_y_SP$dbSNP_ID_Het_5[fila_het])
+      Vec_dbSNP_ID_hom_ig <- c(Vec_dbSNP_ID_hom_ig,
+                            tabla_hom_35$dbSNP_ID_Hom_35[fila_hom])
+      Vec_frec_nfe_het_ig <- c(Vec_frec_nfe_het_ig,
+                            tabla_het_5_y_SP$ExACFreqNfe_Het_5[fila_het])
+      Vec_frec_nfe_hom_ig <- c(Vec_frec_nfe_hom_ig,
+                            tabla_hom_35$ExACFreqNfe_Hom_35[fila_hom])
+      Vec_clinvar_signif_het_ig <- c(Vec_clinvar_signif_het_ig,
+             tabla_het_5_y_SP$`ClinVar-Significance_Het_5`[fila_het])
+      Vec_clinvar_signif_hom_ig <- c(Vec_clinvar_signif_hom_ig,
+                          tabla_hom_35$`ClinVar-Significance_Hom_35`[fila_hom])
+    }
+  }
+}
+```
+
+# 9.1. GENERACIÓN DE TABLAS CON LOS DATOS OBTENIDOS
+```{r}
+tabla_genes_iguales <- data.frame(Vec_muestras_iguales, Vec_gen_hom_ig, Vec_gen_het_ig, Vec_variantes_hom_ig, Vec_variantes_het_ig, Vec_cromosomas_hom_ig, Vec_cromosomas_het_ig, Vec_coordenadas_hom_ig, Vec_coordenadas_het_ig, Vec_transcript_hom_ig, Vec_transcript_het_ig, Vec_consequence_hom_ig, Vec_consequence_het_ig, Vec_prot_pos_aa_hom_ig, Vec_prot_pos_aa_het_ig, Vec_sift_hom_ig, Vec_sift_het_ig, Vec_polyphen_hom_ig, Vec_polyphen_het_ig, Vec_dbSNP_ID_hom_ig, Vec_dbSNP_ID_het_ig, Vec_frec_nfe_hom_ig, Vec_frec_nfe_het_ig, Vec_clinvar_signif_hom_ig, Vec_clinvar_signif_het_ig)
+```
+
+```{r}
+#Cambiamos el nombre de las columnas de la tabla.
+colnames(tabla_genes_iguales) <- c("Muestras_iguales", "Gen_hom", "Gen_het", "Variantes_hom", "Variantes_het", "Cromosomas_hom", "Cromosomas_het", "Coordenadas_hom", "Coordenadas_het", "Transcript_hom", "Transcript_het", "Consequence_hom", "Consequence_het", "Prot_pos_aa_hom", "Prot_pos_aa_het", "Sift_hom", "Sift_het", "Polyphen_hom", "Polyphen_het", "DbSNP_ID_hom", "DbSNP_ID_het", "Frec_nfe_hom", "Frec_nfe_het", "Clinvar_signif_hom", "Clinvar_signif_het")
+```
+
+# 9.2. GENERACIÓN DE ARCHIVO XLSX
+```{r}
+write_xlsx(tabla_genes_iguales, path = "./Excels_Script/Genes_Iguales_Hom_Het/tabla_genes_iguales.xlsx")
+```
+
+
+# 10. DESCRIPCIÓN DE RESULTADOS
+
+## 10.1. NÚMERO DE GENES Y VARIANTES DIFERENTES QUE HAY EN TODAS LAS MUESTRAS ANALIZADAS (SIN FILTROS)
+
+Este apartado consta de dos bucles for, que recorrerán la tabla de homocigotos y heterocigosis sin filtros (`tabla_het` y `tabla_hom`) con el objetivo de obtener todas las variantes y genes que hay en las muestras (sin que se repitan).
+
+```{r}
+#Solo aquellos que son factores serán transformados a carácter. Este procedimiento es necesario para realizar los posteriores.
+tabla_het[sapply(tabla_het, is.factor)] <- lapply(tabla_het[sapply(tabla_het, is.factor)], as.character)
+tabla_hom[sapply(tabla_hom, is.factor)] <- lapply(tabla_hom[sapply(tabla_hom, is.factor)], as.character)
+
+for (fila in 1:nrow(tabla_het))
+{
+  #CONDICIÓN: Que el gen seleccionado no se encuentre guardado en Vec_genes. Si
+  #lo está, es que ya ha sido guardado previamente.
+  if (tabla_het$Gene_Het[fila] %notin% Vec_genes)
+  {
+    Vec_genes <- c(Vec_genes, tabla_het$Gene_Het[fila])
+  }
+  
+  #CONDICIÓN: Que la variante seleccionado no se encuentre guardada en 
+  #Vec_variantes. Si lo está, es que ya ha sido guardada previamente.
+  if (tabla_het$Variant_Het[fila] %notin% Vec_variantes)
+  {
+    Vec_variantes <- c(Vec_variantes, tabla_het$Variant_Het[fila])
+  }
+}
+
+for (fila in 1:nrow(tabla_hom))
+{
+  #CONDICIÓN: Que el gen seleccionado no se encuentre guardado en Vec_genes. Si
+  #lo está, es que ya ha sido guardado previamente.
+  if (tabla_hom$Gene_Hom[fila] %notin% Vec_genes)
+  {
+    Vec_genes <- c(Vec_genes, tabla_hom$Gene_Hom[fila])
+  }
+  
+  #CONDICIÓN: Que la variante seleccionado no se encuentre guardada en 
+  #Vec_variantes. Si lo está, es que ya ha sido guardada previamente.
+  if (tabla_hom$Variant_Hom[fila] %notin% Vec_variantes)
+  {
+    Vec_variantes <- c(Vec_variantes, tabla_hom$Variant_Hom[fila])
+  }
+}
+
+print(paste0("El número de genes diferentes es: ", length(Vec_genes)))
+print(paste0("El número de variantes diferentes es: ", length(Vec_variantes)))
+```
+
+
+## 10.2. NÚMERO DE VARIANTES QUE HAY EN TODAS LAS MUESTRAS ANALIZADAS (SIN FILTROS) POR PACIENTE
+
+En el siguiente bloque de código se pretende agrupar las muestras por genes y coordenadas. Una vez están agrupadas, se procederá a calcular el número de variantes y genes por cada muestra.
+
+Como se hace por separado (homocigosis y heterocigosis), en los siguientes pasos es necesario unir ambas tablas. Una vez hecho esto, se sumarán todas las frecuencias de cada una de las muestras, mostrando así el número de variantes totales que tiene cada muestra.
+
+```{r}
+## HETEROCIGOSIS
+num_variantes_het_pac <- count(tabla_het, vars = c("Sample", "Variant_Het", "Coordinate_Het"))
+
+#Sumamos las frecuencias por muestra
+num_variantes_het_pac_total <- aggregate(num_variantes_het_pac$freq, by=list(Muestra = num_variantes_het_pac$Sample), FUN=sum)
+
+#Ordenamos de mayor a menor
+num_variantes_het_pac <- num_variantes_het_pac[order(num_variantes_het_pac$freq, decreasing=TRUE),]
+num_variantes_het_pac_total <- num_variantes_het_pac_total[order(num_variantes_het_pac_total$x, decreasing=TRUE),]
+
+## HOMOCIGOSIS
+num_variantes_hom_pac <- count(tabla_hom, vars = c("Sample", "Variant_Hom", "Coordinate_Hom"))
+
+#Sumamos las frecuencias por muestra
+num_variantes_hom_pac_total <- aggregate(num_variantes_hom_pac$freq, by=list(Muestra = num_variantes_hom_pac$Sample), FUN=sum)
+
+#Ordenamos de mayor a menor
+num_variantes_hom_pac <- num_variantes_hom_pac[order(num_variantes_hom_pac$freq, decreasing=TRUE),]
+num_variantes_hom_pac_total <- num_variantes_hom_pac_total[order(num_variantes_hom_pac_total$x, decreasing=TRUE),]
+
+#Para poder juntar dos tablas, es necesario que tengan una columna en común con el mismo número de filas. Para ello, se añadirá la columna id.
+num_variantes_het_pac_total$id <- rownames(num_variantes_het_pac_total)
+num_variantes_hom_pac_total$id <- rownames(num_variantes_het_pac_total)
+#Se juntan ambas tablas.
+num_variantes_totales_x_paciente <- Reduce(function(...) merge (..., all=T), list(num_variantes_het_pac_total, num_variantes_hom_pac_total))
+#Se elimina la columna id.
+num_variantes_totales_x_paciente <- num_variantes_totales_x_paciente[,-3] 
+num_variantes_het_pac_total <- num_variantes_het_pac_total[,-3] 
+num_variantes_hom_pac_total <- num_variantes_hom_pac_total[,-3] 
+
+#Se realiza la suma por paciente para ver el número total de variantes de cada uno.
+suma_variantes_totales_x_paciente <- aggregate(num_variantes_totales_x_paciente$x, by=list(Sample=num_variantes_totales_x_paciente$Muestra), FUN=sum)
+
+#Ordenamos de mayor a menor.
+suma_variantes_totales_x_paciente <- suma_variantes_totales_x_paciente[order(suma_variantes_totales_x_paciente$x, decreasing=TRUE),]
+
+#Cambiamos el nombre de las columnas
+colnames(suma_variantes_totales_x_paciente) <- c("Sample", "Num_variantes")
+```
+
+
+### 10.2.1. GENERACIÓN DE ARCHIVOS XLSX
+```{r}
+write_xlsx(num_variantes_het_pac, path = "./Excels_Script/DescripcionResultados/Var_x_Paciente/num_variantes_het_pac.xlsx")
+
+write_xlsx(num_variantes_het_pac_total, path = "./Excels_Script/DescripcionResultados/Var_x_Paciente/num_variantes_het_pac_total.xlsx")
+
+write_xlsx(num_variantes_hom_pac, path = "./Excels_Script/DescripcionResultados/Var_x_Paciente/num_variantes_hom_pac.xlsx")
+
+write_xlsx(num_variantes_hom_pac_total, path = "./Excels_Script/DescripcionResultados/Var_x_Paciente/num_variantes_hom_pac_total.xlsx")
+
+write_xlsx(num_variantes_totales_x_paciente, path = "./Excels_Script/DescripcionResultados/Var_x_Paciente/num_variantes_totales_x_paciente.xlsx")
+
+write_xlsx(suma_variantes_totales_x_paciente, path = "./Excels_Script/DescripcionResultados/Var_x_Paciente/suma_variantes_totales_x_paciente.xlsx")
+```
+
+## 10.3. MEDIA DE VARIANTES GENÉTICAS POR PACIENTE
+
+Para calcular la media de variantes genéticas por paciente:
+```{r}
+#Calculamos el número de muestras
+pacientes_totales <- suma_variantes_totales_x_paciente  %>%
+  group_by(Sample) %>%
+  tally()
+
+#Número de pacientes totales 
+print(paste0("El número de pacientes totales es: ", nrow(pacientes_totales))) 
+
+#Número total de variantes por pacientes.
+suma_global_variantes_pac <- sum(suma_variantes_totales_x_paciente$Num_variantes)
+print(paste0("El número total de variantes es: ", suma_global_variantes_pac)) 
+
+#Media de variantes
+media_variantes_pac <- suma_global_variantes_pac / nrow(pacientes_totales)
+print(paste0("El número medio de variantes por paciente es: ", media_variantes_pac))
+
+#El paciente con mayor número de alteraciones
+mayor_num_var_pac <- suma_variantes_totales_x_paciente$Num_variantes[1]
+num_pac_mayor_num_var <- suma_variantes_totales_x_paciente$Num_variantes == mayor_num_var_pac
+
+#CONDICIÓN: Si solo hay un paciente con el mayor número de alteraciones.
+if (sum(num_pac_mayor_num_var) == 1)
+{
+  print(paste0("El paciente con mayor número de alteraciones identificadas presenta ", mayor_num_var_pac, " variantes."))
+} else
+  { 
+    #CONDICIÓN: Si hay más de un paciente con el mayor número de 
+    #alteraciones.
+    print(paste0("Hay ", sum(num_pac_mayor_num_var), " pacientes ", 
+                 "que presentan ", mayor_num_var_pac,
+                 " variantes."))
+  }
+
+#El paciente con menor número de alteraciones
+menor_num_var_pac <-
+  suma_variantes_totales_x_paciente$Num_variantes[nrow(suma_variantes_totales_x_paciente)]
+num_pac_menor_num_var <- suma_variantes_totales_x_paciente$Num_variantes == menor_num_var_pac
+
+#CONDICIÓN: Si solo hay un paciente con el menor número de alteraciones.
+if (sum(num_pac_menor_num_var) == 1)
+{
+  print(paste0("El paciente con menor número de alteraciones identificadas presenta ", menor_num_var_pac, " variantes."))
+} else
+  {
+    #CONDICIÓN: Si hay más de un paciente con el menor número de 
+    #alteraciones.
+    print(paste0("Hay ", sum(num_pac_menor_num_var), " pacientes ", 
+                 "que presentan ", menor_num_var_pac,
+                 " variantes."))
+  }
+```
+
+## 10.4. GENES CON MAYOR Y MENOR NÚMERO DE VARIANTES 
+
+```{r}
+##HETEROCIGOSIS
+
+#Contamos el número de genes, teniendo en cuenta las variantes y las coordenadas.
+num_genes_het_global <- count(tabla_het, vars = c("Gene_Het", "Variant_Het", "Coordinate_Het"))
+#Sumamos todas las frecuencias de cada uno de los genes
+num_genes_het_global_total <- aggregate(num_genes_het_global$freq, by=list(Gen = num_genes_het_global$Gene_Het), FUN=sum)
+
+##HOMOCIGOSIS
+
+#Contamos el número de genes, teniendo en cuenta las variantes y las coordenadas.
+num_genes_hom_global <- count(tabla_hom, vars = c("Gene_Hom", "Variant_Hom", "Coordinate_Hom"))
+#Contamos el número de genes, teniendo en cuenta las variantes y las coordenadas.
+num_genes_hom_global_total <- aggregate(num_genes_hom_global$freq, by=list(Gen = num_genes_hom_global$Gene_Hom), FUN=sum)
+
+# A continuación, tenemos que sumar las frecuencias de cada uno de los genes en las dos tablas (hom y het).
+#Para poder juntar dos tablas, es necesario que tengan una columna en común con el mismo número de filas. Para ello, se añadirá la columna id.
+num_genes_hom_global_total$id <- rownames(num_genes_hom_global_total)
+num_genes_het_global_total$id <- rownames(num_genes_het_global_total)
+#Se juntan ambas tablas.
+num_genes_var_totales_x_globales <- Reduce(function(...) merge (..., all=T), list(num_genes_hom_global_total, num_genes_het_global_total))
+#Se elimina la columna id.
+num_genes_var_totales_x_globales <- num_genes_var_totales_x_globales[,-3] 
+num_genes_hom_global_total <- num_genes_hom_global_total[,-3] 
+num_genes_het_global_total <- num_genes_het_global_total[,-3] 
+
+#Se realiza la suma por paciente para ver el número total de variantes de cada uno.
+suma_genes_var_totales_x_globales <- aggregate(num_genes_var_totales_x_globales$x, by=list(Gen=num_genes_var_totales_x_globales$Gen), FUN=sum)
+
+#Ordenamos de mayor a menor.
+suma_genes_var_totales_x_globales <- suma_genes_var_totales_x_globales[order(suma_genes_var_totales_x_globales$x, decreasing=TRUE),]
+
+#Cambiamos el nombre de las columnas
+colnames(suma_genes_var_totales_x_globales) <- c("Gen", "Num_variantes")
+```
+
+Para obtener el gen con mayor número de alteraciones:
+
+```{r}
+mayor_num_var <- suma_genes_var_totales_x_globales$Num_variantes[1]
+gen_mayor_num_var <- suma_genes_var_totales_x_globales$Num_variantes == mayor_num_var
+
+#CONDICIÓN: Si solo hay un gen con el mayor número de alteraciones
+if (sum(gen_mayor_num_var) == 1)
+{
+  print(paste0("El gen con mayor número de alteraciones identificadas es ", 
+               suma_genes_var_totales_x_globales$Gen[1], " con ",
+               suma_genes_var_totales_x_globales$Num_variantes[1], 
+               " variantes."))
+} else
+  {
+    #CONDICIÓN: si hay más de un gen con el mayor número de alteraciones
+    print(paste0("Hay ", sum(gen_mayor_num_var), " genes ", 
+                 "en los que solo se ha identificado ", mayor_num_var,
+                 " variante/s."))
+  }
+```
+
+Para saber el gen con menor número de alteraciones:
+
+```{r}
+menor_num_var <- suma_genes_var_totales_x_globales$Num_variantes[nrow(suma_genes_var_totales_x_globales)]
+gen_menor_num_var <- suma_genes_var_totales_x_globales$Num_variantes == menor_num_var
+
+#CONDICIÓN: Si solo hay un gen con el mayor número de alteraciones
+if (sum(gen_menor_num_var) == 1)
+{
+  print(paste0("El gen con menor número de alteraciones identificadas es ", 
+  suma_genes_var_totales_x_globales$Gen[nrow(suma_genes_var_totales_x_globales)], " con ",
+  suma_genes_var_totales_x_globales$Num_variantes[nrow(suma_genes_var_totales_x_globales)], " variantes."))
+} else
+  {
+    #CONDICIÓN: Si hay más de un gen con el mayor número de alteraciones
+    print(paste0("Hay ", sum(gen_menor_num_var), " genes ", 
+                 "en los que solo se ha identificado ", menor_num_var,
+                 " variante/s."))
+  }
+```
+
+Para saber qué variante es la más frecuente (sin filtros):
+```{r}
+##HETEROCIGOSIS
+
+#Contamos el número de variantes, teniendo en cuenta las coordenadas.
+num_var_het_global <- count(tabla_het, vars = c("Sample", "Variant_Het", "Coordinate_Het"))
+#Sumamos todas las frecuencias de cada uno de los genes
+num_var_het_global_total <- aggregate(num_var_het_global$freq, by=list(Coordenada = num_var_het_global$Coordinate_Het), FUN=sum)
+
+##HOMOCIGOSIS
+
+#Contamos el número de genes, teniendo en cuenta las coordenadas.
+num_var_hom_global <- count(tabla_hom, vars = c("Variant_Hom", "Coordinate_Hom"))
+num_var_hom_global_total <- aggregate(num_var_hom_global$freq, by=list(Coordenada = num_var_hom_global$Coordinate_Hom), FUN=sum)
+
+# A continuación, tenemos que sumar las frecuencias de cada uno de las variantes en las dos tablas (hom y het).
+#Para poder juntar dos tablas, es necesario que tengan una columna en común con el mismo número de filas. Para ello, se añadirá la columna id.
+num_var_hom_global_total$id <- rownames(num_var_hom_global_total)
+num_var_het_global_total$id <- rownames(num_var_het_global_total)
+#Se juntan ambas tablas.
+num_var_totales_x_globales <- Reduce(function(...) merge (..., all=T), list(num_var_hom_global_total, num_var_het_global_total))
+#Se elimina la columna id.
+num_var_totales_x_globales <- num_var_totales_x_globales[,-3] 
+num_var_hom_global_total <- num_var_hom_global_total[,-3] 
+num_var_het_global_total <- num_var_het_global_total[,-3] 
+
+#Se realiza la suma por paciente para ver el número total de variantes de cada uno.
+suma_var_totales_x_globales <- aggregate(num_var_totales_x_globales$x, by=list(Coordenada=num_var_totales_x_globales$Coordenada), FUN=sum)
+
+#Ordenamos de mayor a menor.
+suma_var_totales_x_globales <- suma_var_totales_x_globales[order(suma_var_totales_x_globales$x, decreasing=TRUE),]
+
+#Cambiamos el nombre de las columnas
+colnames(suma_var_totales_x_globales) <- c("Coordenada", "Num_muestras")
+```
+
+Para saber el mayor número de alteraciones por paciente:
+
+```{r}
+num_var_mas_frec <- suma_var_totales_x_globales$Num_muestras[1]
+num_muestras_var_mas_frec <- suma_var_totales_x_globales$Num_muestras == num_var_mas_frec
+
+#CONDICIÓN: Si solo hay una alteración en x pacientes.
+if (sum(num_muestras_var_mas_frec) == 1)
+{
+  print(paste0("Hay 1 alteración que se encuentra en ", num_var_mas_frec, " pacientes/s."))
+} else
+  {
+    #CONDICIÓN: Si hay más de una alteración presente en x pacientes.
+    print(paste0("Hay ", sum(num_muestras_var_mas_frec), " alteración/es que se encuentra/n en ", num_var_mas_frec, " paciente/s."))
+  }
+```
+
+Para saber el menor número de alteraciones por paciente:
+
+```{r}
+num_var_menos_frec <- suma_var_totales_x_globales$Num_muestras[nrow(suma_var_totales_x_globales)]
+num_muestras_var_menos_frec <- suma_var_totales_x_globales$Num_muestras == num_var_menos_frec
+
+#CONDICIÓN: Si solo hay una alteración en x pacientes.
+if (sum(num_muestras_var_menos_frec) == 1)
+{
+    print(paste0("Hay 1 alteración que se encuentra en ", num_var_menos_frec, 
+                 " pacientes/s."))
+} else
+  {
+    #CONDICIÓN: Si hay más de una alteración presente en x pacientes.
+    print(paste0("Hay ", num_var_menos_frec, " alteración/es que se encuentra/n en ", sum(num_muestras_var_menos_frec), " paciente/s."))
+  }
+```
+
+### 10.4.1. GENERACIÓN DE ARCHIVOS XLSX
+```{r}
+#GENES
+
+write_xlsx(num_genes_het_global, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Genes/num_genes_het_global.xlsx")
+
+write_xlsx(num_genes_het_global_total, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Genes/num_genes_het_global_total.xlsx")
+
+write_xlsx(num_genes_hom_global, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Genes/num_genes_hom_global.xlsx")
+
+write_xlsx(num_genes_hom_global_total, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Genes/num_genes_hom_global_total.xlsx")
+
+write_xlsx(num_genes_var_totales_x_globales, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Genes/num_genes_var_totales_x_globales.xlsx")
+
+write_xlsx(suma_genes_var_totales_x_globales, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Genes/suma_genes_var_totales_x_globales.xlsx")
+
+
+#VARIANTES
+
+write_xlsx(num_var_het_global, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Variantes/num_var_het_global.xlsx")
+
+write_xlsx(num_var_het_global_total, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Variantes/num_var_het_global_total.xlsx")
+
+write_xlsx(num_var_hom_global, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Variantes/num_var_hom_global.xlsx")
+
+write_xlsx(num_var_hom_global_total, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Variantes/num_var_hom_global_total.xlsx")
+
+write_xlsx(num_var_totales_x_globales, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Variantes/num_var_totales_x_globales.xlsx")
+
+write_xlsx(suma_var_totales_x_globales, path = "./Excels_Script/DescripcionResultados/MayorGenVar/Variantes/suma_var_totales_x_globales.xlsx")
+```
+
+
+## 10.5. ALTERACIONES CON UNA MAF SUPERIOR AL 5%
+
+El siguiente código consta de dos bucles for, uno por cada tabla (homocigosis y heterocigosis). Con él, se pretende encontrar aquellas variantes que presenten una frecuencia alélica mayor o igual a 5%.
+
+En caso afirmativo, se guardará la variante, la coordenada y la frecuencia alélica (esta última, solo para asegurarnos que el proceso se ha realizado correctamente).
+
+```{r}
+for (fila in 1:nrow(tabla_het))
+{
+  #CONDICIÓN: que la frecuencia alélica sea mayor o igual al 5%
+  if (tabla_het$ExACFreqNfe_Het[fila] >= 5)
+  {
+   Vec_alt_mayor_5 <- c(Vec_alt_mayor_5, tabla_het$Variant_Het[fila])
+   Vec_coord_mayor_5 <- c(Vec_coord_mayor_5, tabla_het$Coordinate_Het[fila])
+   Vec_frec_mayor_5 <- c(Vec_frec_mayor_5, tabla_het$ExACFreqNfe_Het[fila])
+  }
+}
+
+for (fila in 1:nrow(tabla_hom))
+{
+  #CONDICIÓN: que la frecuencia alélica sea mayor o igual al 5%
+  if (tabla_hom$ExACFreqNfe_Hom[fila] >= 5)
+  {
+    Vec_alt_mayor_5 <- c(Vec_alt_mayor_5, tabla_hom$Variant_Hom[fila])
+    Vec_coord_mayor_5 <- c(Vec_coord_mayor_5, tabla_hom$Coordinate_Hom[fila])
+    Vec_frec_mayor_5 <- c(Vec_frec_mayor_5, tabla_hom$ExACFreqNfe_Hom[fila])
+  }
+}
+
+#Generamos la tabla con los datos obtenidos.
+tabla_alt_mayor_5 <- data.frame(Vec_alt_mayor_5, Vec_coord_mayor_5, Vec_frec_mayor_5)
+```
+
+```{r}
+print(paste0("Hay ", nrow(tabla_alt_mayor_5), " variantes que presentan una MAF superior al 5%"))
+```
+
+Porcentaje de variantes que presentan más del 5% en MAF.
+```{r}
+porcentaje_var_MAF_5 <- (length(row.names(tabla_alt_mayor_5))*100)/(suma_global_variantes_pac)
+
+print(paste0("El porcentaje de variantes con respecto al total, que presentan más del 5% en MAF, es: ", porcentaje_var_MAF_5))
+```
+
+### 10.5.2. GENERACIÓN DE ARCHIVOS XLSX
+```{r}
+write_xlsx(tabla_alt_mayor_5, path = "./Excels_Script/DescripcionResultados/MAF_mayor_5/tabla_alt_mayor_5.xlsx")
+```
+
+
+## 10.6. VARIANTES NO DESCRITAS PREVIAMENTE
+
+Con el objetivo de estudiar si existe alguna muestra con variantes con frecuencia alélica igual a 0, se procede a ejecutar el siguiente código.
+Esta condición (columna de ExACFreqNfe = 0) será evaluada en ambas tablas (`tabla_hom` y `tabla_het`).
+
+```{r}
+#HETEROCIGOSIS
+for (fila in 1:nrow(tabla_het))
+{
+  #CONDICIÓN: Que la frecuencia alélica sea igual a 0.
+  if (tabla_het$ExACFreqNfe_Het[fila] == 0)
+  {
+    Vec_muestra_no_desc_het <- c(Vec_muestra_no_desc_het,
+                                 tabla_het$Sample[fila])
+    Vec_gen_no_desc_het <- c(Vec_gen_no_desc_het, tabla_het$Gene_Het[fila])
+    Vec_var_no_desc_het <- c(Vec_var_no_desc_het, tabla_het$Variant_Het[fila])
+    Vec_cromosoma_no_desc_het <- c(Vec_cromosoma_no_desc_het,
+                                   tabla_het$Chr_Het[fila])
+    Vec_coord_no_desc_het <- c(Vec_coord_no_desc_het,
+                               tabla_het$Coordinate_Het[fila])
+    Vec_heterocigosis <- c(Vec_heterocigosis, "Het")
+    Vec_prot_pos_aa_no_desc_het <- c(Vec_prot_pos_aa_no_desc_het,
+                          tabla_het$`Protein_Position - AminoAcids_Het`[fila])
+    Vec_consequence_no_desc_het <- c(Vec_consequence_no_desc_het,
+                                     tabla_het$Consequence_Het[fila])
+    Vec_sift_no_desc_het <- c(Vec_sift_no_desc_het, tabla_het$Sift_Het[fila])
+    Vec_polyphen_no_desc_het <- c(Vec_polyphen_no_desc_het,
+                                  tabla_het$PolyPhen_Het[fila])
+    Vec_freq_no_desc_het <- c(Vec_freq_no_desc_het,
+                              tabla_het$ExACFreqNfe_Het[fila])
+    
+    Vec_dbSNP_ID_no_desc_het <- c(Vec_dbSNP_ID_no_desc_het,
+                                  tabla_het$dbSNP_ID_Het[fila])
+    Vec_clinvar_signif_no_desc_het <- c(Vec_clinvar_signif_no_desc_het,
+                                    tabla_het$`ClinVar-Significance_Het`[fila])
+  }
+}
+
+#HOMOCIGOSIS
+for (fila in 1:nrow(tabla_hom))
+{  
+  #CONDICIÓN: Que la frecuencia alélica sea igual a 0.
+  if (tabla_hom$ExACFreqNfe_Hom[fila] == 0)
+  {
+    Vec_muestra_no_desc_hom <- c(Vec_muestra_no_desc_hom,
+                                 tabla_hom$Sample[fila])
+    Vec_gen_no_desc_hom <- c(Vec_gen_no_desc_hom, tabla_hom$Gene_Hom[fila])
+    Vec_var_no_desc_hom <- c(Vec_var_no_desc_hom, tabla_hom$Variant_Hom[fila])
+    Vec_cromosoma_no_desc_hom <- c(Vec_cromosoma_no_desc_hom,
+                                   tabla_hom$Chr_Hom[fila])
+    Vec_coord_no_desc_hom <- c(Vec_coord_no_desc_hom,
+                               tabla_het$Coordinate_Hom[fila])
+    Vec_homocigosis <- c(Vec_homocigosis, "Hom")
+    Vec_prot_pos_aa_no_desc_hom <- c(Vec_prot_pos_aa_no_desc_hom, 
+                      tabla_hom$`Protein_Position - AminoAcids_Hom`[fila])
+    Vec_consequence_no_desc_hom <- c(Vec_consequence_no_desc_hom,
+                                     tabla_hom$Consequence_Hom[fila])
+    Vec_sift_no_desc_hom <- c(Vec_sift_no_desc_hom, tabla_hom$Sift_Hom[fila])
+    Vec_polyphen_no_desc_hom <- c(Vec_polyphen_no_desc_hom,
+                              tabla_hom$PolyPhen_Hom[fila])
+    Vec_freq_no_desc_hom <- c(Vec_freq_no_desc_hom,
+                              tabla_hom$ExACFreqNfe_Hom[fila])
+    
+    Vec_dbSNP_ID_no_desc_hom <- c(Vec_dbSNP_ID_no_desc_hom,
+                                  tabla_hom$dbSNP_ID_Hom[fila])
+    Vec_clinvar_signif_no_desc_hom <- c(Vec_clinvar_signif_no_desc_hom,
+                                    tabla_hom$dbSNP_ID_Hom[fila])
+  }
+}
+```
+
+### 10.6.1. GENERACIÓN DE TABLAS CON LOS DATOS OBTENIDOS
+```{r}
+tabla_datos_no_descritos_het <- data.frame(Vec_muestra_no_desc_het, Vec_heterocigosis, Vec_gen_no_desc_het, Vec_var_no_desc_het, Vec_cromosoma_no_desc_het, Vec_coord_no_desc_het, Vec_prot_pos_aa_no_desc_het, Vec_consequence_no_desc_het, Vec_sift_no_desc_het, Vec_polyphen_no_desc_het, Vec_dbSNP_ID_no_desc_het, Vec_freq_no_desc_het, Vec_clinvar_signif_no_desc_het)
+
+tabla_datos_no_descritos_hom <- data.frame(Vec_muestra_no_desc_hom, Vec_homocigosis, Vec_gen_no_desc_hom, Vec_var_no_desc_hom, Vec_cromosoma_no_desc_hom, Vec_coord_no_desc_hom, Vec_prot_pos_aa_no_desc_hom, Vec_consequence_no_desc_hom, Vec_sift_no_desc_hom, Vec_polyphen_no_desc_hom, Vec_dbSNP_ID_no_desc_hom, Vec_freq_no_desc_hom, Vec_clinvar_signif_no_desc_hom)
+```
+
+
+```{r}
+#Variantes no descritas en homocigosis (normalmente es 0, pero por si no lo es)
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_datos_no_descritos_hom) != 0)
+{
+  print(paste0("En total, hay ", 
+               (nrow(tabla_datos_no_descritos_het) +
+                  nrow(tabla_datos_no_descritos_hom)),
+               " variantes no descritas"))
+  
+  porcentaje_var_no_desc_het_hom <-
+     ((nrow(tabla_datos_no_descritos_het) 
+       + nrow(tabla_datos_no_descritos_hom))*100)/(suma_global_variantes_pac)
+  
+  print(paste0("El porcentaje de variantes no descritas con respecto al total es: ", porcentaje_var_no_desc_het_hom))
+  
+} else
+ { #Si no hay variantes en heterocigosis...
+    print(paste0("En total, hay ", nrow(tabla_datos_no_descritos_het),
+                 " variantes no descritas."))
+   porcentaje_var_no_desc_het <-
+     ((nrow(tabla_datos_no_descritos_het))*100)/(suma_global_variantes_pac)
+   print(paste0("El porcentaje de variantes no descritas con respecto al total es: ", porcentaje_var_no_desc_het))
+ }
+```
+
+### 10.6.2. GENERACIÓN DE ARCHIVOS XLSX
+```{r}
+write_xlsx(tabla_datos_no_descritos_het, path = "./Excels_Script/DescripcionResultados/VarNoDescritas/tabla_datos_no_descritos_het.xlsx")
+
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_datos_no_descritos_hom) != 0)
+{
+  write_xlsx(tabla_datos_no_descritos_hom, path = "./Excels_Script/DescripcionResultados/VarNoDescritas/tabla_datos_no_descritos_hom.xlsx")
+}
+```
+
+
+## 10.7. VARIANTES BENIGNAS, PATOGÉNICAS Y CLASIFICADAS CON CLINVAR 
+
+### 10.7.1. VARIANTES BENIGNAS
+
+Para poder estudiar el número de variantes que se encuentran clasificadas como "benignas" ó "toleradas" según los métodos de predicción de patogenicidad SIFT y PolyPhen, será necesario recorrer las tablas de homocigosis y heterocigosis (`tabla_hom` y `tabla_het`). 
+
+A continuación, se comprobará si ese gen presenta "tolerated" o "benign" en las columnas de SIFT y PolyPhen respectivamente. En caso afirmativo, se guardará toda la información relativa a ese gen.
+
+```{r}
+##HOMOCIGOSIS 
+
+for (fila in 1:nrow(tabla_hom))
+{
+  #CONDICIÓN 1: que el gen esté reconocido como "tolerated" ó
+  #CONDICIÓN 2: que el gen esté reconocido como "benign" 
+  if (startsWith(tabla_hom$Sift_Hom[fila], "tolerated") ||
+      startsWith(tabla_hom$PolyPhen_Hom[fila], "benign"))
+  {
+    Vec_muestra_hom_SP_BT <- c(Vec_muestra_hom_SP_BT, tabla_hom$Sample[fila])
+    Vec_genes_hom_SP_BT <- c(Vec_genes_hom_SP_BT, tabla_hom$Gene_Hom[fila])
+    Vec_variantes_hom_SP_BT <- c(Vec_variantes_hom_SP_BT,
+                                tabla_hom$Variant_Hom[fila])
+    Vec_cromosomas_hom_SP_BT <- c(Vec_cromosomas_hom_SP_BT,
+                                  tabla_hom$Chr_Hom[fila])
+    Vec_coordenadas_hom_SP_BT <- c(Vec_coordenadas_hom_SP_BT, 
+                                  tabla_hom$Coordinate_Hom[fila])
+    Vec_transcript_hom_SP_BT <- c(Vec_transcript_hom_SP_BT,
+                                 tabla_hom$Transcript_Hom[fila])
+    Vec_consequence_hom_SP_BT <- c(Vec_consequence_hom_SP_BT,
+                                  tabla_hom$Consequence_Hom[fila])
+    Vec_prot_pos_aa_hom_SP_BT <- c(Vec_prot_pos_aa_hom_SP_BT, 
+                          tabla_hom$`Protein_Position - AminoAcids_Hom`[fila])
+    Vec_sift_hom_SP_BT <- c(Vec_sift_hom_SP_BT, tabla_hom$Sift_Hom[fila])
+    Vec_polyphen_hom_SP_BT <- c(Vec_polyphen_hom_SP_BT,
+                                tabla_hom$PolyPhen_Hom[fila])
+    Vec_dbSNP_ID_hom_SP_BT <- c(Vec_dbSNP_ID_hom_SP_BT,
+                                tabla_hom$dbSNP_ID_Hom[fila])
+    Vec_frec_nfe_hom_SP_BT <- c(Vec_frec_nfe_hom_SP_BT, 
+                               tabla_hom$ExACFreqNfe_Hom[fila]) 
+    Vec_clinvar_signif_hom_SP_BT <- c(Vec_clinvar_signif_hom_SP_BT,
+                                  tabla_hom$`ClinVar-Significance_Hom`[fila])
+  }
+}
+
+##HETEROCIGOSIS
+
+for (fila in 1:nrow(tabla_het))
+{
+  #CONDICIÓN 1: que el gen esté reconocido como "tolerated" ó
+  #CONDICIÓN 2: que el gen esté reconocido como "benign" 
+  if (startsWith(tabla_het$Sift_Het[fila], "tolerated") ||
+      startsWith(tabla_het$PolyPhen_Het[fila], "benign"))
+  {
+    Vec_muestra_het_SP_BT <- c(Vec_muestra_het_SP_BT, tabla_het$Sample[fila])
+    Vec_genes_het_SP_BT <- c(Vec_genes_het_SP_BT, tabla_het$Gene_Het[fila])
+    Vec_variantes_het_SP_BT <- c(Vec_variantes_het_SP_BT,
+                                tabla_het$Variant_Het[fila])
+    Vec_cromosomas_het_SP_BT <- c(Vec_cromosomas_het_SP_BT,
+                                  tabla_het$Chr_Het[fila])
+    Vec_coordenadas_het_SP_BT <- c(Vec_coordenadas_het_SP_BT, 
+                                  tabla_het$Coordinate_Het[fila])
+    Vec_transcript_het_SP_BT <- c(Vec_transcript_het_SP_BT,
+                                 tabla_het$Transcript_Het[fila])
+    Vec_consequence_het_SP_BT <- c(Vec_consequence_het_SP_BT,
+                                  tabla_het$Consequence_Het[fila])
+    Vec_prot_pos_aa_het_SP_BT <- c(Vec_prot_pos_aa_het_SP_BT, 
+                       tabla_het$`Protein_Position - AminoAcids_Het`[fila])
+    Vec_sift_het_SP_BT <- c(Vec_sift_het_SP_BT, tabla_het$Sift_Het[fila])
+    Vec_polyphen_het_SP_BT <- c(Vec_polyphen_het_SP_BT,
+                                tabla_het$PolyPhen_Het[fila])
+    Vec_dbSNP_ID_het_SP_BT <- c(Vec_dbSNP_ID_het_SP_BT,
+                                tabla_het$dbSNP_ID_Het[fila])
+    Vec_frec_nfe_het_SP_BT <- c(Vec_frec_nfe_het_SP_BT, 
+                               tabla_het$ExACFreqNfe_Het[fila]) 
+    Vec_clinvar_signif_het_SP_BT <- c(Vec_clinvar_signif_het_SP_BT,
+                                  tabla_het$`ClinVar-Significance_Het`[fila])
+  }
+}
+```
+
+#### 10.7.1.1. GENERACIÓN DE TABLAS CON LOS DATOS OBTENIDOS
+
+```{r}
+#Heterocigosis
+tabla_var_het_SP_BT <- data.frame(Vec_muestra_het_SP_BT, Vec_genes_het_SP_BT, Vec_variantes_het_SP_BT, Vec_cromosomas_het_SP_BT, Vec_coordenadas_het_SP_BT, Vec_transcript_het_SP_BT, Vec_consequence_het_SP_BT, Vec_prot_pos_aa_het_SP_BT, Vec_sift_het_SP_BT, Vec_polyphen_het_SP_BT, Vec_dbSNP_ID_het_SP_BT, Vec_frec_nfe_het_SP_BT, Vec_clinvar_signif_het_SP_BT)
+
+#Homocigosis
+tabla_var_hom_SP_BT <- data.frame(Vec_muestra_hom_SP_BT, Vec_genes_hom_SP_BT, Vec_variantes_hom_SP_BT, Vec_cromosomas_hom_SP_BT, Vec_coordenadas_hom_SP_BT, Vec_transcript_hom_SP_BT, Vec_consequence_hom_SP_BT, Vec_prot_pos_aa_hom_SP_BT, Vec_sift_hom_SP_BT, Vec_polyphen_hom_SP_BT, Vec_dbSNP_ID_hom_SP_BT, Vec_frec_nfe_hom_SP_BT, Vec_clinvar_signif_hom_SP_BT)
+```
+
+Cambiamos el nombre de las columnas de cada tabla:
+```{r}
+colnames(tabla_var_hom_SP_BT) <- c("Sample", "Gene_Hom_SP_BT", "Variant_Hom_SP_BT", "Chr_Hom_SP_BT", "Coordinate_Hom_SP_BT", "Transcript_Hom_SP_BT", "Consequence_Hom_SP_BT", "Protein_Position - AminoAcids_Hom_SP_BT", "Sift_Hom_SP_BT", "PolyPhen_Hom_SP_BT", "dbSNP_ID_Hom_SP_BT", "ExACFreqNfe_Hom_SP_BT", "ClinVar-Significance_Hom_SP_BT")
+
+colnames(tabla_var_het_SP_BT) <- c("Sample", "Gene_Het_SP_BT", "Variant_Het_SP_BT", "Chr_Het_SP_BT", "Coordinate_Het_SP_BT", "Transcript_Het_SP_BT", "Consequence_Het_SP_BT", "Protein_Position - AminoAcids_Het_SP_BT", "Sift_Het_SP_BT", "PolyPhen_Het_SP_BT", "dbSNP_ID_Het_SP_BT", "ExACFreqNfe_Het_SP_BT", "ClinVar-Significance_Het_SP_BT")
+```
+
+
+#### 10.7.1.2. GENERACIÓN DE ARCHIVOS XLSX
+
+```{r}
+write_xlsx(tabla_var_het_SP_BT, path = "./Excels_Script/DescripcionResultados/ClasificacionSP/Variantes_het_SP_BT.xlsx")
+
+write_xlsx(tabla_var_hom_SP_BT, path = "./Excels_Script/DescripcionResultados/ClasificacionSP/Variantes_hom_SP_BT.xlsx")
+```
+
+Calculamos el número de variantes total (en homocigosis y heterocigosis) que están clasificadas como toleradas o benignas según los modelos de predicción de patogenicidad utilizados (SIFT y Polyphen).
+
+```{r}
+suma_variantes_BT <- nrow(tabla_var_hom_SP_BT) + nrow(tabla_var_het_SP_BT)
+porcentaje_var_BT <- (suma_variantes_BT*100)/(suma_global_variantes_pac)
+
+
+print(paste0("El número de variantes clasificadas como toleradas o benignas según Sift y PolyPhen es ", suma_variantes_BT, ". Esto supone un porcentaje de: ", porcentaje_var_BT, " con respecto al total de variantes."))
+```
+
+
+### 10.7.2. VARIANTES PATOGÉNICAS
+
+Para poder estudiar el número de variantes que se encuentran clasificadas como "patogénicas" según los métodos de predicción de patogenicidad SIFT y PolyPhen, será necesario recorrer las tablas de homocigosis y heterocigosis (`tabla_hom` y `tabla_het`). 
+
+A continuación, se comprobará si ese gen presenta "deleterious", "probably damaging" o "possibly damaging" en las columnas de SIFT y PolyPhen. En caso afirmativo, se guardará toda la información relativa a ese gen.
+
+```{r}
+##HOMOCIGOSIS 
+
+for (fila in 1:nrow(tabla_hom))
+{
+  #CONDICIÓN 1: que el gen esté reconocido como "deleterious" ó
+  #CONDICIÓN 2: que el gen esté reconocido como "probably damaging" ó
+  #CONDICIÓN 3: que el gen esté reconocido como "possibly damaging"
+  if (startsWith(tabla_hom$Sift_Hom[fila], "deleterious") ||
+      startsWith(tabla_hom$PolyPhen_Hom[fila], "probably damaging") ||
+      startsWith(tabla_hom$PolyPhen_Hom[fila], "possibly damaging"))
+  {
+    Vec_muestra_hom_SP_P <- c(Vec_muestra_hom_SP_P, tabla_hom$Sample[fila])
+    Vec_genes_hom_SP_P <- c(Vec_genes_hom_SP_P, tabla_hom$Gene_Hom[fila])
+    Vec_variantes_hom_SP_P <- c(Vec_variantes_hom_SP_P,
+                                 tabla_hom$Variant_Hom[fila])
+    Vec_cromosomas_hom_SP_P <- c(Vec_cromosomas_hom_SP_P,
+                                  tabla_hom$Chr_Hom[fila])
+    Vec_coordenadas_hom_SP_P <- c(Vec_coordenadas_hom_SP_P, 
+                                   tabla_hom$Coordinate_Hom[fila])
+    Vec_transcript_hom_SP_P <- c(Vec_transcript_hom_SP_P,
+                                  tabla_hom$Transcript_Hom[fila])
+    Vec_consequence_hom_SP_P <- c(Vec_consequence_hom_SP_P,
+                                   tabla_hom$Consequence_Hom[fila])
+    Vec_prot_pos_aa_hom_SP_P <- c(Vec_prot_pos_aa_hom_SP_P, 
+                      tabla_hom$`Protein_Position - AminoAcids_Hom`[fila])
+    Vec_sift_hom_SP_P <- c(Vec_sift_hom_SP_P, tabla_hom$Sift_Hom[fila])
+    Vec_polyphen_hom_SP_P <- c(Vec_polyphen_hom_SP_P,
+                                tabla_hom$PolyPhen_Hom[fila])
+    Vec_dbSNP_ID_hom_SP_P <- c(Vec_dbSNP_ID_hom_SP_P,
+                                tabla_hom$dbSNP_ID_Hom[fila])
+    Vec_frec_nfe_hom_SP_P <- c(Vec_frec_nfe_hom_SP_P, 
+                                tabla_hom$ExACFreqNfe_Hom[fila]) 
+    Vec_clinvar_signif_hom_SP_P <- c(Vec_clinvar_signif_hom_SP_P,
+                                  tabla_hom$`ClinVar-Significance_Hom`[fila])
+  }
+}
+
+##HETEROCIGOSIS
+
+for (fila in 1:nrow(tabla_het))
+{
+  #CONDICIÓN 1: que el gen esté reconocido como "deleterious" ó
+  #CONDICIÓN 2: que el gen esté reconocido como "probably damaging" ó
+  #CONDICIÓN 3: que el gen esté reconocido como "possibly damaging" 
+  if (startsWith(tabla_het$Sift_Het[fila], "deleterious") ||
+      startsWith(tabla_het$PolyPhen_Het[fila], "probably damaging") ||
+      startsWith(tabla_het$PolyPhen_Het[fila], "possibly damaging"))
+  {
+    Vec_muestra_het_SP_P <- c(Vec_muestra_het_SP_P, tabla_het$Sample[fila])
+    Vec_genes_het_SP_P <- c(Vec_genes_het_SP_P, tabla_het$Gene_Het[fila])
+    Vec_variantes_het_SP_P <- c(Vec_variantes_het_SP_P,
+                                 tabla_het$Variant_Het[fila])
+    Vec_cromosomas_het_SP_P <- c(Vec_cromosomas_het_SP_P,
+                                  tabla_het$Chr_Het[fila])
+    Vec_coordenadas_het_SP_P <- c(Vec_coordenadas_het_SP_P, 
+                                   tabla_het$Coordinate_Het[fila])
+    Vec_transcript_het_SP_P <- c(Vec_transcript_het_SP_P,
+                                  tabla_het$Transcript_Het[fila])
+    Vec_consequence_het_SP_P <- c(Vec_consequence_het_SP_P,
+                                   tabla_het$Consequence_Het[fila])
+    Vec_prot_pos_aa_het_SP_P <- c(Vec_prot_pos_aa_het_SP_P, 
+                          tabla_het$`Protein_Position - AminoAcids_Het`[fila])
+    Vec_sift_het_SP_P <- c(Vec_sift_het_SP_P, tabla_het$Sift_Het[fila])
+    Vec_polyphen_het_SP_P <- c(Vec_polyphen_het_SP_P,
+                                tabla_het$PolyPhen_Het[fila])
+    Vec_dbSNP_ID_het_SP_P <- c(Vec_dbSNP_ID_het_SP_P,
+                                tabla_het$dbSNP_ID_Het[fila])
+    Vec_frec_nfe_het_SP_P <- c(Vec_frec_nfe_het_SP_P, 
+                                tabla_het$ExACFreqNfe_Het[fila]) 
+    Vec_clinvar_signif_het_SP_P <- c(Vec_clinvar_signif_het_SP_P,
+                                  tabla_het$`ClinVar-Significance_Het`[fila])
+  }
+}
+```
+
+#### 10.7.2.1. GENERACIÓN DE TABLAS CON LOS DATOS OBTENIDOS
+
+```{r}
+#Heterocigosis
+tabla_var_het_SP_P <- data.frame(Vec_muestra_het_SP_P, Vec_genes_het_SP_P, Vec_variantes_het_SP_P, Vec_cromosomas_het_SP_P, Vec_coordenadas_het_SP_P, Vec_transcript_het_SP_P, Vec_consequence_het_SP_P, Vec_prot_pos_aa_het_SP_P, Vec_sift_het_SP_P, Vec_polyphen_het_SP_P, Vec_dbSNP_ID_het_SP_P, Vec_frec_nfe_het_SP_P, Vec_clinvar_signif_het_SP_P)
+
+#Homocigosis
+tabla_var_hom_SP_P <- data.frame(Vec_muestra_hom_SP_P, Vec_genes_hom_SP_P, Vec_variantes_hom_SP_P, Vec_cromosomas_hom_SP_P, Vec_coordenadas_hom_SP_P, Vec_transcript_hom_SP_P, Vec_consequence_hom_SP_P, Vec_prot_pos_aa_hom_SP_P, Vec_sift_hom_SP_P, Vec_polyphen_hom_SP_P, Vec_dbSNP_ID_hom_SP_P, Vec_frec_nfe_hom_SP_P, Vec_clinvar_signif_hom_SP_P)
+```
+
+Cambiamos el nombre de las columnas de cada tabla:
+```{r}
+colnames(tabla_var_hom_SP_P) <- c("Sample", "Gene_Hom_SP_P", "Variant_Hom_SP_P", "Chr_Hom_SP_P", "Coordinate_Hom_SP_P", "Transcript_Hom_SP_P", "Consequence_Hom_SP_P", "Protein_Position - AminoAcids_Hom_SP_P", "Sift_Hom_SP_P", "PolyPhen_Hom_SP_P", "dbSNP_ID_Hom_SP_P", "ExACFreqNfe_Hom_SP_P", "ClinVar-Significance_Hom_SP_P")
+
+colnames(tabla_var_het_SP_P) <- c("Sample", "Gene_Het_SP_P", "Variant_Het_SP_P", "Chr_Het_SP_P", "Coordinate_Het_SP_P", "Transcript_Het_SP_P", "Consequence_Het_SP_P", "Protein_Position - AminoAcids_Het_SP_P", "Sift_Het_SP_P", "PolyPhen_Het_SP_P", "dbSNP_ID_Het_SP_P", "ExACFreqNfe_Het_SP_P", "ClinVar-Significance_Het_SP_P")
+```
+
+#### 10.7.2.2. GENERACIÓN DE ARCHIVOS XLSX
+
+```{r}
+write_xlsx(tabla_var_het_SP_P, path = "./Excels_Script/DescripcionResultados/ClasificacionSP/Variantes_het_SP_P.xlsx")
+
+write_xlsx(tabla_var_hom_SP_P, path = "./Excels_Script/DescripcionResultados/ClasificacionSP/Variantes_hom_SP_P.xlsx")
+```
+
+Calculamos el número de variantes total (en homocigosis y heterocigosis) que están clasificadas como patogénicas según los modelos de predicción de patogenicidad utilizados (SIFT y Polyphen).
+
+```{r}
+suma_variantes_P <- nrow(tabla_var_hom_SP_P) + nrow(tabla_var_het_SP_P)
+porcentaje_var_P <- (suma_variantes_P*100)/(suma_global_variantes_pac)
+
+
+print(paste0("El número de variantes clasificadas como patogénicas según SIFT y PolyPhen es ", suma_variantes_P, ". Esto supone un porcentaje de: ", porcentaje_var_P, " con respecto al total de variantes."))
+```
+
+### 10.7.3. VARIANTES CLASIFICADAS CON CLINVAR
+
+```{r}
+#CONDICIÓN: Que la tabla no esté vacía.
+if (nrow(tabla_hom_CV) != 0)
+{
+  suma_variantes_CV <- (nrow(tabla_het_CV) + (nrow(tabla_hom_CV)))
+  porcentaje_var_CV <- (suma_variantes_CV*100)/(suma_global_variantes_pac)
+  
+  print(paste0("El número de variantes clasificadas en ClinVar es de: ",
+               suma_variantes_CV, ". Esto supone un porcentaje de: ",
+               porcentaje_var_CV, " con respecto al total de variantes." ))
+} else 
+  {
+    suma_variantes_CV <- nrow(tabla_het_CV)
+    porcentaje_var_CV <- (nrow(tabla_het_CV)*100)/(suma_global_variantes_pac)
+    print(paste0("El número de variantes clasificadas con ClinVar es de: ",
+               suma_variantes_CV, ". Esto supone un porcentaje de: ",
+               porcentaje_var_CV, " con respecto al total de variantes." ))
+  }
+```
+
